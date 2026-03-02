@@ -21,6 +21,7 @@ import {
   Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend,
 } from "recharts";
 
+// ─── Utilities ────────────────────────────────
 function cn(...classes: (string | boolean | undefined)[]) {
   return classes.filter(Boolean).join(" ");
 }
@@ -76,6 +77,7 @@ const RARITY_COLORS: Record<string, string> = {
   "Semi-Limited": "#3b82f6", "Mass Release": "#6b7280", "Unknown": "#4b5563",
 };
 
+// ─── Tab definitions ──────────────────────────
 type Tab = "dashboard" | "drops" | "rarity" | "portfolio" | "cop" | "digest";
 const TABS: { id: Tab; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -86,8 +88,10 @@ const TABS: { id: Tab; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "digest", label: "Digest", icon: FileText },
 ];
 
+// ─── Main App ─────────────────────────────────
 export default function SoleOracle() {
   const [tab, setTab] = useState<Tab>("dashboard");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [darkMode, setDarkMode] = useState(true);
   const [clock, setClock] = useState("");
@@ -99,11 +103,27 @@ export default function SoleOracle() {
     return () => clearInterval(id);
   }, []);
 
+  const handleTabChange = (t: Tab) => {
+    setTab(t);
+    setMobileNavOpen(false);
+  };
+
   return (
     <div className={cn("flex h-screen overflow-hidden", darkMode ? "dark" : "")}>
+      {/* ── Mobile overlay ── */}
+      {mobileNavOpen && (
+        <div
+          className="fixed inset-0 bg-black/60 z-30 md:hidden"
+          onClick={() => setMobileNavOpen(false)}
+        />
+      )}
+
+      {/* ── Sidebar (desktop: always visible, mobile: slide-in drawer) ── */}
       <aside className={cn(
-        "flex flex-col bg-bg-card border-r border-white/5 transition-all duration-300 z-20",
-        sidebarOpen ? "w-56" : "w-16"
+        "flex flex-col bg-bg-card border-r border-white/5 transition-all duration-300 z-40",
+        // Desktop
+        "hidden md:flex",
+        sidebarOpen ? "md:w-56" : "md:w-16",
       )}>
         <div className="flex items-center gap-2 p-4 border-b border-white/5">
           <div className="w-8 h-8 bg-accent rounded-lg flex items-center justify-center flex-shrink-0">
@@ -116,7 +136,7 @@ export default function SoleOracle() {
           {TABS.map(t => (
             <button
               key={t.id}
-              onClick={() => setTab(t.id)}
+              onClick={() => handleTabChange(t.id)}
               className={cn(
                 "w-full flex items-center gap-3 px-4 py-2.5 text-sm transition-colors",
                 tab === t.id
@@ -139,20 +159,61 @@ export default function SoleOracle() {
         </button>
       </aside>
 
-      <div className="flex-1 flex flex-col overflow-hidden">
-        <header className="flex items-center justify-between px-6 py-3 border-b border-white/5 bg-bg-card/80 backdrop-blur">
-          <div className="flex items-center gap-3">
-            <button onClick={() => setSidebarOpen(!sidebarOpen)} className="md:hidden">
-              <Menu size={20} />
+      {/* ── Mobile slide-in drawer ── */}
+      <aside className={cn(
+        "fixed inset-y-0 left-0 w-64 flex flex-col bg-bg-card border-r border-white/5 z-50 transition-transform duration-300 md:hidden",
+        mobileNavOpen ? "translate-x-0" : "-translate-x-full"
+      )}>
+        <div className="flex items-center justify-between p-4 border-b border-white/5">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 bg-accent rounded-lg flex items-center justify-center flex-shrink-0">
+              <Flame size={18} className="text-black" />
+            </div>
+            <span className="font-display text-lg font-bold tracking-tight">SoleOracle</span>
+          </div>
+          <button onClick={() => setMobileNavOpen(false)} className="p-2 text-gray-400">
+            <ChevronLeft size={20} />
+          </button>
+        </div>
+
+        <nav className="flex-1 py-2 overflow-y-auto">
+          {TABS.map(t => (
+            <button
+              key={t.id}
+              onClick={() => handleTabChange(t.id)}
+              className={cn(
+                "w-full flex items-center gap-3 px-4 py-3.5 text-base transition-colors",
+                tab === t.id
+                  ? "bg-accent text-black font-semibold"
+                  : "text-gray-400 hover:text-white hover:bg-white/5"
+              )}
+            >
+              <t.icon size={20} />
+              {t.label}
             </button>
-            <h1 className="font-display text-xl font-bold">
+          ))}
+        </nav>
+      </aside>
+
+      {/* ── Main Content ── */}
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+        {/* Header */}
+        <header className="flex items-center justify-between px-4 md:px-6 py-3 border-b border-white/5 bg-bg-card/80 backdrop-blur">
+          <div className="flex items-center gap-2 md:gap-3 min-w-0">
+            <button
+              onClick={() => setMobileNavOpen(true)}
+              className="p-1.5 md:hidden flex-shrink-0"
+            >
+              <Menu size={22} />
+            </button>
+            <h1 className="font-display text-lg md:text-xl font-bold truncate">
               {TABS.find(t => t.id === tab)?.label}
             </h1>
-            <span className="text-xs text-gray-500">Live data</span>
+            <span className="text-xs text-gray-500 hidden sm:inline">Live data</span>
           </div>
 
-          <div className="flex items-center gap-3">
-            <span className="text-sm tabular-nums text-gray-400">{clock}</span>
+          <div className="flex items-center gap-1.5 md:gap-3 flex-shrink-0">
+            <span className="text-xs md:text-sm tabular-nums text-gray-400 hidden sm:inline">{clock}</span>
             <button
               onClick={() => triggerScrapers("all")}
               className="p-2 rounded-lg hover:bg-white/5 text-gray-400 hover:text-white"
@@ -168,7 +229,7 @@ export default function SoleOracle() {
                 const a = document.createElement("a");
                 a.href = url; a.download = "soleoracle-backup.json"; a.click();
               }}
-              className="p-2 rounded-lg hover:bg-white/5 text-gray-400 hover:text-white"
+              className="p-2 rounded-lg hover:bg-white/5 text-gray-400 hover:text-white hidden sm:flex"
               title="Export data"
             >
               <Download size={16} />
@@ -182,7 +243,8 @@ export default function SoleOracle() {
           </div>
         </header>
 
-        <main className="flex-1 overflow-y-auto p-6">
+        {/* Content */}
+        <main className="flex-1 overflow-y-auto p-3 md:p-6">
           {tab === "dashboard" && <DashboardTab />}
           {tab === "drops" && <DropsTab />}
           {tab === "rarity" && <RarityTab />}
@@ -190,12 +252,32 @@ export default function SoleOracle() {
           {tab === "cop" && <CopTab />}
           {tab === "digest" && <DigestTab />}
         </main>
+
+        {/* ── Mobile bottom tab bar ── */}
+        <nav className="md:hidden flex border-t border-white/5 bg-bg-card safe-bottom">
+          {TABS.map(t => (
+            <button
+              key={t.id}
+              onClick={() => handleTabChange(t.id)}
+              className={cn(
+                "flex-1 flex flex-col items-center gap-0.5 py-2 pt-2.5 text-[10px] transition-colors",
+                tab === t.id ? "text-accent" : "text-gray-500"
+              )}
+            >
+              <t.icon size={20} />
+              {t.label.split(" ")[0]}
+            </button>
+          ))}
+        </nav>
       </div>
     </div>
   );
 }
 
 
+// ═══════════════════════════════════════════════
+// DASHBOARD TAB
+// ═══════════════════════════════════════════════
 function DashboardTab() {
   const [stats, setStats] = useState<PortfolioStats | null>(null);
   const [dropStats, setDropStats] = useState<DropStats | null>(null);
@@ -211,7 +293,8 @@ function DashboardTab() {
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* KPI Cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
         <KpiCard label="PORTFOLIO VALUE" value={formatPrice(stats?.current_value)} sub={stats ? `from ${formatPrice(stats.total_invested)} invested` : ""} />
         <KpiCard
           label="TOTAL P&L"
@@ -231,6 +314,7 @@ function DashboardTab() {
         />
       </div>
 
+      {/* Hot Drops */}
       <section>
         <h2 className="text-lg font-display font-bold mb-4">Hot Drops This Week</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -246,10 +330,11 @@ function DashboardTab() {
         </div>
       </section>
 
+      {/* Scraper Activity */}
       <section>
         <h2 className="text-lg font-display font-bold mb-4">Scraper Activity</h2>
-        <div className="bg-bg-card border border-white/5 rounded-xl overflow-hidden">
-          <table className="w-full text-sm">
+        <div className="bg-bg-card border border-white/5 rounded-xl overflow-hidden table-scroll">
+          <table className="w-full text-sm min-w-[500px]">
             <thead>
               <tr className="border-b border-white/5 text-gray-500 text-xs uppercase">
                 <th className="text-left p-3">Scraper</th>
@@ -261,14 +346,14 @@ function DashboardTab() {
             <tbody>
               {logs.slice(0, 5).map((l, i) => (
                 <tr key={i} className="border-b border-white/5 last:border-0">
-                  <td className="p-3 font-medium">{l.scraper}</td>
+                  <td className="p-3 font-medium whitespace-nowrap">{l.scraper}</td>
                   <td className="p-3">
                     <span className={cn("px-2 py-0.5 rounded text-xs font-medium",
                       l.status === "success" ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"
                     )}>{l.status}</span>
                   </td>
-                  <td className="p-3 text-gray-400 max-w-xs truncate">{l.message}</td>
-                  <td className="p-3 text-gray-500 tabular-nums">{l.run_at ? new Date(l.run_at).toLocaleTimeString() : ""}</td>
+                  <td className="p-3 text-gray-400 max-w-[200px] truncate">{l.message}</td>
+                  <td className="p-3 text-gray-500 tabular-nums whitespace-nowrap">{l.run_at ? new Date(l.run_at).toLocaleTimeString() : ""}</td>
                 </tr>
               ))}
             </tbody>
@@ -280,6 +365,9 @@ function DashboardTab() {
 }
 
 
+// ═══════════════════════════════════════════════
+// DROPS CALENDAR TAB
+// ═══════════════════════════════════════════════
 function DropsTab() {
   const [drops, setDrops] = useState<Drop[]>([]);
   const [loading, setLoading] = useState(true);
@@ -301,25 +389,38 @@ function DropsTab() {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap gap-3 items-center">
-        <div className="relative flex-1 max-w-md">
-          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
-          <input
-            type="text"
-            placeholder="Search drops..."
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 bg-bg-card border border-white/10 rounded-lg text-sm focus:border-accent focus:outline-none"
-          />
+      {/* Filters */}
+      <div className="space-y-3">
+        <div className="flex gap-2 items-center">
+          <div className="relative flex-1 min-w-0">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+            <input
+              type="text"
+              placeholder="Search drops..."
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="w-full pl-10 pr-4 py-2 bg-bg-card border border-white/10 rounded-lg text-sm focus:border-accent focus:outline-none"
+            />
+          </div>
+          <select
+            value={sort}
+            onChange={e => setSort(e.target.value)}
+            className="px-3 py-2 rounded-lg text-xs bg-bg-card border border-white/10 text-gray-400 flex-shrink-0"
+          >
+            <option value="date">Sort: Date</option>
+            <option value="heat">Sort: Heat</option>
+            <option value="price">Sort: Price</option>
+            <option value="name">Sort: Name</option>
+          </select>
         </div>
 
-        <div className="flex gap-1">
+        <div className="flex gap-1.5 overflow-x-auto hide-scrollbar pb-1">
           {brands.map(b => (
             <button
               key={b}
               onClick={() => setBrand(b === "All Brands" ? "" : b)}
               className={cn(
-                "px-3 py-1.5 rounded-lg text-xs font-medium transition",
+                "px-3 py-1.5 rounded-lg text-xs font-medium transition whitespace-nowrap flex-shrink-0",
                 (brand === "" && b === "All Brands") || brand === b
                   ? "bg-accent text-black"
                   : "bg-bg-card border border-white/10 text-gray-400 hover:text-white"
@@ -327,19 +428,9 @@ function DropsTab() {
             >{b}</button>
           ))}
         </div>
-
-        <select
-          value={sort}
-          onChange={e => setSort(e.target.value)}
-          className="px-3 py-1.5 rounded-lg text-xs bg-bg-card border border-white/10 text-gray-400"
-        >
-          <option value="date">Sort: Date</option>
-          <option value="heat">Sort: Heat</option>
-          <option value="price">Sort: Price</option>
-          <option value="name">Sort: Name</option>
-        </select>
       </div>
 
+      {/* Drop Cards Grid */}
       {loading ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {[1,2,3,4,5,6].map(i => (
@@ -365,6 +456,9 @@ function DropsTab() {
 }
 
 
+// ═══════════════════════════════════════════════
+// RARITY INTEL TAB
+// ═══════════════════════════════════════════════
 function RarityTab() {
   const [leaks, setLeaks] = useState<Leak[]>([]);
   const [rarity, setRarity] = useState<Record<string, number>>({});
@@ -393,18 +487,20 @@ function RarityTab() {
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-        <div className="lg:col-span-3 bg-bg-card border border-white/5 rounded-xl p-5">
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 md:gap-6">
+        {/* Leaderboard */}
+        <div className="lg:col-span-3 bg-bg-card border border-white/5 rounded-xl p-4 md:p-5">
           <h3 className="font-display font-bold mb-4">Production Leaderboard</h3>
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-gray-500 text-xs uppercase border-b border-white/5">
-                <th className="text-left p-2">Shoe</th>
-                <th className="text-left p-2">Production</th>
-                <th className="text-left p-2">Confidence</th>
-                <th className="text-left p-2">Source</th>
-              </tr>
-            </thead>
+          <div className="table-scroll">
+            <table className="w-full text-sm min-w-[450px]">
+              <thead>
+                <tr className="text-gray-500 text-xs uppercase border-b border-white/5">
+                  <th className="text-left p-2">Shoe</th>
+                  <th className="text-left p-2">Production</th>
+                  <th className="text-left p-2">Confidence</th>
+                  <th className="text-left p-2">Source</th>
+                </tr>
+              </thead>
             <tbody>
               {leaks.map(l => (
                 <tr key={l.id} className="border-b border-white/5 last:border-0">
@@ -427,13 +523,15 @@ function RarityTab() {
                 </tr>
               ))}
               {leaks.length === 0 && (
-                <tr><td colSpan={4} className="p-8 text-center text-gray-500">No production leaks yet</td></tr>
+                <tr><td colSpan={4} className="p-8 text-center text-gray-500">No production leaks yet — add one below or wait for scrapers</td></tr>
               )}
             </tbody>
           </table>
+          </div>
         </div>
 
-        <div className="lg:col-span-2 bg-bg-card border border-white/5 rounded-xl p-5">
+        {/* Rarity Distribution */}
+        <div className="lg:col-span-2 bg-bg-card border border-white/5 rounded-xl p-4 md:p-5">
           <h3 className="font-display font-bold mb-4">Rarity Distribution</h3>
           {pieData.length > 0 ? (
             <ResponsiveContainer width="100%" height={250}>
@@ -453,9 +551,10 @@ function RarityTab() {
         </div>
       </div>
 
-      <div className="bg-bg-card border border-white/5 rounded-xl p-5">
+      {/* Add Custom Leak */}
+      <div className="bg-bg-card border border-white/5 rounded-xl p-4 md:p-5">
         <h3 className="font-display font-bold mb-4">Add Custom Leak</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
           <input placeholder="Shoe name" value={form.shoe_name}
             onChange={e => setForm(f => ({ ...f, shoe_name: e.target.value }))}
             className="px-3 py-2 bg-bg border border-white/10 rounded-lg text-sm" />
@@ -481,6 +580,9 @@ function RarityTab() {
 }
 
 
+// ═══════════════════════════════════════════════
+// PORTFOLIO TAB
+// ═══════════════════════════════════════════════
 function PortfolioTab() {
   const [items, setItems] = useState<PortfolioItem[]>([]);
   const [stats, setStats] = useState<PortfolioStats | null>(null);
@@ -512,7 +614,8 @@ function PortfolioTab() {
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* KPIs */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
         <KpiCard label="TOTAL INVESTED" value={formatPrice(stats?.total_invested)} />
         <KpiCard label="CURRENT VALUE" value={formatPrice(stats?.current_value)} />
         <KpiCard
@@ -528,6 +631,7 @@ function PortfolioTab() {
         />
       </div>
 
+      {/* My Collection */}
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-display font-bold">My Collection</h2>
         <button onClick={() => setShowAdd(!showAdd)}
@@ -536,8 +640,9 @@ function PortfolioTab() {
         </button>
       </div>
 
+      {/* Add Form */}
       {showAdd && (
-        <div className="bg-bg-card border border-white/5 rounded-xl p-5 grid grid-cols-1 md:grid-cols-4 gap-3">
+        <div className="bg-bg-card border border-white/5 rounded-xl p-4 md:p-5 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
           <input placeholder="Shoe name" value={form.name} onChange={e => setForm(f => ({...f, name: e.target.value}))}
             className="px-3 py-2 bg-bg border border-white/10 rounded-lg text-sm" />
           <input placeholder="Purchase price" type="number" value={form.purchase_price}
@@ -561,8 +666,9 @@ function PortfolioTab() {
         </div>
       )}
 
-      <div className="bg-bg-card border border-white/5 rounded-xl overflow-hidden">
-        <table className="w-full text-sm">
+      {/* Portfolio Table */}
+      <div className="bg-bg-card border border-white/5 rounded-xl overflow-hidden table-scroll">
+        <table className="w-full text-sm min-w-[700px]">
           <thead>
             <tr className="border-b border-white/5 text-gray-500 text-xs uppercase">
               <th className="text-left p-3">Shoe</th>
@@ -613,6 +719,7 @@ function PortfolioTab() {
         </table>
       </div>
 
+      {/* Value chart */}
       {snapshots.length > 0 && (
         <div className="bg-bg-card border border-white/5 rounded-xl p-5">
           <h3 className="font-display font-bold mb-4">Portfolio Value Over Time</h3>
@@ -635,6 +742,9 @@ function PortfolioTab() {
 }
 
 
+// ═══════════════════════════════════════════════
+// COP ASSISTANT TAB
+// ═══════════════════════════════════════════════
 function CopTab() {
   const [raffles, setRaffles] = useState<Raffle[]>([]);
   const [bookmarklet, setBookmarklet] = useState("");
@@ -660,18 +770,20 @@ function CopTab() {
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-bg-card border border-white/5 rounded-xl p-5">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6">
+        {/* Active Raffles */}
+        <div className="bg-bg-card border border-white/5 rounded-xl p-4 md:p-5">
           <h3 className="font-display font-bold mb-4">Active Raffles</h3>
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-gray-500 text-xs uppercase border-b border-white/5">
-                <th className="text-left p-2">Shoe</th>
-                <th className="text-left p-2">Store</th>
-                <th className="text-left p-2">Deadline</th>
-                <th className="text-left p-2">Link</th>
-              </tr>
-            </thead>
+          <div className="table-scroll">
+            <table className="w-full text-sm min-w-[400px]">
+              <thead>
+                <tr className="text-gray-500 text-xs uppercase border-b border-white/5">
+                  <th className="text-left p-2">Shoe</th>
+                  <th className="text-left p-2">Store</th>
+                  <th className="text-left p-2">Deadline</th>
+                  <th className="text-left p-2">Link</th>
+                </tr>
+              </thead>
             <tbody>
               {raffles.map((r, i) => (
                 <tr key={i} className="border-b border-white/5 last:border-0">
@@ -690,9 +802,11 @@ function CopTab() {
               )}
             </tbody>
           </table>
+          </div>
         </div>
 
-        <div className="bg-bg-card border border-white/5 rounded-xl p-5">
+        {/* Saved Profile */}
+        <div className="bg-bg-card border border-white/5 rounded-xl p-4 md:p-5">
           <h3 className="font-display font-bold mb-4">Saved Profile</h3>
           <div className="space-y-3">
             {(["name", "email", "phone", "size", "zip"] as const).map(field => (
@@ -713,8 +827,9 @@ function CopTab() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-bg-card border border-white/5 rounded-xl p-5">
+      {/* Bookmarklet & Templates */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6">
+        <div className="bg-bg-card border border-white/5 rounded-xl p-4 md:p-5">
           <div className="flex items-center justify-between mb-3">
             <h3 className="font-display font-bold">Autofill Bookmarklet</h3>
             {bookmarklet && (
@@ -730,7 +845,7 @@ function CopTab() {
           )}
         </div>
 
-        <div className="bg-bg-card border border-white/5 rounded-xl p-5 space-y-4">
+        <div className="bg-bg-card border border-white/5 rounded-xl p-4 md:p-5 space-y-4">
           <h3 className="font-display font-bold">Raffle Entry Templates</h3>
           <div>
             <div className="flex items-center justify-between">
@@ -759,6 +874,9 @@ function CopTab() {
 }
 
 
+// ═══════════════════════════════════════════════
+// DIGEST TAB
+// ═══════════════════════════════════════════════
 function DigestTab() {
   const [digest, setDigest] = useState<Record<string, any> | null>(null);
 
@@ -775,18 +893,19 @@ function DigestTab() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-display font-bold">Weekly Digest — {new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</h2>
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+        <h2 className="text-base md:text-lg font-display font-bold">Weekly Digest — {new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</h2>
         <button
           onClick={() => window.print()}
-          className="bg-accent text-black font-semibold px-4 py-2 rounded-lg flex items-center gap-2 text-sm"
+          className="bg-accent text-black font-semibold px-4 py-2 rounded-lg flex items-center gap-2 text-sm flex-shrink-0"
         >
           <Download size={16} /> Download PDF
         </button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-bg-card border border-white/5 rounded-xl p-5">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6">
+        {/* Heat Leaderboard */}
+        <div className="bg-bg-card border border-white/5 rounded-xl p-4 md:p-5">
           <h3 className="font-display font-bold mb-4">Heat Index Leaderboard</h3>
           {barData.length > 0 ? (
             <ResponsiveContainer width="100%" height={300}>
@@ -801,7 +920,8 @@ function DigestTab() {
           ) : <div className="h-64 flex items-center justify-center text-gray-500">No data</div>}
         </div>
 
-        <div className="bg-bg-card border border-white/5 rounded-xl p-5 space-y-4">
+        {/* Portfolio Summary */}
+        <div className="bg-bg-card border border-white/5 rounded-xl p-4 md:p-5 space-y-4">
           <h3 className="font-display font-bold">Digest Summary</h3>
           <div>
             <p className="text-xs text-gray-500 uppercase mb-1">Portfolio Performance</p>
@@ -836,8 +956,9 @@ function DigestTab() {
         </div>
       </div>
 
+      {/* Rarity Breakdown */}
       {rarityDist.length > 0 && (
-        <div className="bg-bg-card border border-white/5 rounded-xl p-5">
+        <div className="bg-bg-card border border-white/5 rounded-xl p-4 md:p-5">
           <h3 className="font-display font-bold mb-4">Rarity Breakdown (All Tracked Drops)</h3>
           <ResponsiveContainer width="100%" height={250}>
             <PieChart>
@@ -857,12 +978,15 @@ function DigestTab() {
 }
 
 
+// ═══════════════════════════════════════════════
+// SHARED COMPONENTS
+// ═══════════════════════════════════════════════
 function KpiCard({ label, value, sub, accent }: { label: string; value: string; sub?: string; accent?: boolean }) {
   return (
-    <div className="bg-bg-card border border-white/5 rounded-xl p-5">
-      <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">{label}</p>
-      <p className={cn("text-2xl font-bold tabular-nums", accent && "text-green-400")}>{value}</p>
-      {sub && <p className={cn("text-sm mt-1", accent ? "text-green-400/70" : "text-gray-500")}>{sub}</p>}
+    <div className="bg-bg-card border border-white/5 rounded-xl p-3 md:p-5">
+      <p className="text-[10px] md:text-xs text-gray-500 uppercase tracking-wider mb-1">{label}</p>
+      <p className={cn("text-lg md:text-2xl font-bold tabular-nums truncate", accent && "text-green-400")}>{value}</p>
+      {sub && <p className={cn("text-xs md:text-sm mt-0.5 md:mt-1 truncate", accent ? "text-green-400/70" : "text-gray-500")}>{sub}</p>}
     </div>
   );
 }
@@ -870,6 +994,7 @@ function KpiCard({ label, value, sub, accent }: { label: string; value: string; 
 function DropCard({ drop, expanded }: { drop: Drop; expanded?: boolean }) {
   return (
     <div className="bg-bg-card border border-white/5 rounded-xl overflow-hidden hover:border-white/10 transition group">
+      {/* Header with rarity + heat */}
       <div className="relative p-4 pb-0">
         <div className="flex justify-between items-start">
           <span className={cn("px-2 py-0.5 rounded text-xs font-bold border", rarityColor(drop.rarity_tier))}>
@@ -882,6 +1007,7 @@ function DropCard({ drop, expanded }: { drop: Drop; expanded?: boolean }) {
           </div>
         </div>
 
+        {/* Image placeholder */}
         <div className="h-32 flex items-center justify-center my-3">
           {drop.image_url && drop.image_url.startsWith("http") ? (
             <img src={drop.image_url} alt={drop.name} className="max-h-full max-w-full object-contain" />
@@ -897,6 +1023,7 @@ function DropCard({ drop, expanded }: { drop: Drop; expanded?: boolean }) {
         </div>
       </div>
 
+      {/* Info */}
       <div className="p-4 pt-0 space-y-2">
         <h3 className="font-semibold text-sm leading-tight line-clamp-2">{drop.name}</h3>
 
@@ -905,6 +1032,7 @@ function DropCard({ drop, expanded }: { drop: Drop; expanded?: boolean }) {
           <span className="flex items-center gap-1">📅 {formatDate(drop.release_date)}</span>
         </div>
 
+        {/* Countdown */}
         {drop.release_date && (
           <p className={cn("text-xs font-semibold",
             countdown(drop.release_date) === "DROPPED" ? "text-gray-500" : "text-accent"
@@ -913,6 +1041,7 @@ function DropCard({ drop, expanded }: { drop: Drop; expanded?: boolean }) {
           </p>
         )}
 
+        {/* Production */}
         {expanded && (
           <div className="flex items-center justify-between text-xs text-gray-500 pt-1 border-t border-white/5">
             <span>{drop.production_number ? `${drop.production_number.toLocaleString()} pairs` : "Production TBD"}</span>
@@ -924,6 +1053,7 @@ function DropCard({ drop, expanded }: { drop: Drop; expanded?: boolean }) {
           </div>
         )}
 
+        {/* Source */}
         <div className="flex items-center justify-between text-xs text-gray-600">
           {drop.source && <span>{drop.source}</span>}
           {drop.stockx_price && <span className="text-accent">StockX: {formatPrice(drop.stockx_price)}</span>}
