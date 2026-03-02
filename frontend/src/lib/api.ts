@@ -95,6 +95,36 @@ export interface Raffle {
   deadline: string;
 }
 
+export interface OracleVerdict {
+  verdict: "COP" | "WAIT" | "PASS";
+  confidence: number;
+  score: number;
+  risk_tier: string;
+  projected_resale_low: number | null;
+  projected_resale_high: number | null;
+  roi_low: number | null;
+  roi_high: number | null;
+  production_estimate: number;
+  production_confidence: string;
+  reasoning: string[];
+  signals: {
+    scarcity: number;
+    hype: number;
+    resale_multiple: number;
+    velocity: number;
+    heat_index: number;
+  };
+  drop_id: number | null;
+  drop_name: string;
+  matched?: boolean;
+  brand?: string;
+  retail_price?: number | null;
+  release_date?: string | null;
+  image_url?: string;
+  rarity_tier?: string;
+}
+
+// Drops
 export const getDrops = (params?: Record<string, string>) => {
   const q = params ? "?" + new URLSearchParams(params).toString() : "";
   return apiFetch<Drop[]>(`/api/drops${q}`);
@@ -102,6 +132,7 @@ export const getDrops = (params?: Record<string, string>) => {
 export const getHotDrops = (limit = 5) => apiFetch<Drop[]>(`/api/drops/hot?limit=${limit}`);
 export const getDropStats = () => apiFetch<DropStats>("/api/drops/stats");
 
+// Portfolio
 export const getPortfolio = () => apiFetch<PortfolioItem[]>("/api/portfolio");
 export const addPortfolioItem = (item: Record<string, unknown>) =>
   apiFetch<PortfolioItem>("/api/portfolio", { method: "POST", body: JSON.stringify(item) });
@@ -111,18 +142,22 @@ export const getPortfolioStats = () => apiFetch<PortfolioStats>("/api/portfolio/
 export const getPortfolioSnapshots = (days = 90) =>
   apiFetch<{ date: string; value: number; cost: number }[]>(`/api/portfolio/snapshots?days=${days}`);
 
+// Leaks
 export const getLeaks = () => apiFetch<Leak[]>("/api/leaks");
 export const addLeak = (leak: Record<string, unknown>) =>
   apiFetch<Leak>("/api/leaks", { method: "POST", body: JSON.stringify(leak) });
 export const getRarityDistribution = () => apiFetch<Record<string, number>>("/api/leaks/rarity-distribution");
 
+// Raffles
 export const getRaffles = () => apiFetch<Raffle[]>("/api/raffles");
 
+// Cop tools
 export const generateBookmarklet = (params: Record<string, string>) =>
   apiFetch<{ bookmarklet: string }>(`/api/cop/bookmarklet?${new URLSearchParams(params)}`, { method: "POST" });
 export const getRaffleTemplates = (name: string, size: string) =>
   apiFetch<{ discord: string; instagram: string }>(`/api/cop/raffle-templates?name=${name}&size=${size}`);
 
+// Scrapers
 export const triggerScrapers = (target = "all") =>
   apiFetch<{ triggered: string; status: string }>(`/api/scrapers/run?target=${target}`, { method: "POST" });
 export const getScraperLogs = () =>
@@ -130,6 +165,21 @@ export const getScraperLogs = () =>
     "/api/scrapers/logs"
   );
 
+// Digest
 export const getDigest = () => apiFetch<Record<string, unknown>>("/api/digest");
+
+// Oracle
+export const getOracleBatch = (limit = 20) =>
+  apiFetch<OracleVerdict[]>(`/api/oracle/batch?limit=${limit}`);
+export const getOracleVerdict = (dropId: number) =>
+  apiFetch<OracleVerdict>(`/api/oracle/verdict/${dropId}`);
+export const getOracleVerdictByName = (name: string, brand?: string, retailPrice?: number) => {
+  const params = new URLSearchParams({ name });
+  if (brand) params.set("brand", brand);
+  if (retailPrice) params.set("retail_price", String(retailPrice));
+  return apiFetch<OracleVerdict>(`/api/oracle/verdict?${params}`, { method: "POST" });
+};
+
+// Export
 export const exportData = () => apiFetch<Record<string, unknown>>("/api/export");
 export const getHealth = () => apiFetch<{ status: string; service: string; timestamp: string }>("/api/health");
