@@ -23,9 +23,26 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Scrollbar */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
 
+/* Tabular nums for data */
 .tabular-nums { font-variant-numeric: tabular-nums lining-nums; }
+
+/* Safe area bottom (for iOS notch / home indicator) */
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Mobile table scroll wrapper */
+.table-scroll {
+  -webkit-overflow-scrolling: touch;
+  overflow-x: auto;
+}
+
+/* Hide scrollbar on mobile filter strips */
+.hide-scrollbar::-webkit-scrollbar { display: none; }
+.hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
