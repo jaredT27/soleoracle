@@ -1,4 +1,4 @@
-"""SoleOracle scrapers v3 — RSS-based extraction that works from cloud servers."""
+"""SoleOracle scrapers v4 — RSS-based extraction + Nike SNKRS direct calendar."""
 import json, re, asyncio, logging, traceback
 from datetime import datetime, timedelta
 from typing import Optional
@@ -16,6 +16,28 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+NIKE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"macOS"',
+    "Upgrade-Insecure-Requests": "1",
+}
+
+# Non-footwear subtitle keywords — if subtitle exists and contains none of the
+# footwear keywords, the item is skipped
+FOOTWEAR_SUBTITLE_KEYWORDS = ["shoes", "trail", "basketball", "sneaker", "boot", "cleat", "slide", "sandal", "mule"]
+
+# Kids/baby size indicators to skip
+KIDS_SUBTITLE_KEYWORDS = ["big kids", "little kids", "toddler", "baby", "preschool", "infant", "grade school", "gs)"]
+
 
 def _parse_price(text: str) -> Optional[float]:
     if not text:
@@ -107,10 +129,224 @@ def _is_sneaker(name: str) -> bool:
     ]
     return any(kw in nl for kw in sneaker_keywords)
 
+# RSS article-level junk filter — skip obvious non-product articles
+_JUNK_PHRASES = [
+    "best releases", "here's a look", "where to buy", "official images",
+    "first look", "everything you need", "top 10", "ranking", "roundup",
+    "weekly recap", "month in review", "buying guide", "how to style",
+]
 
-# ===============================================
+def _is_junk_article(title: str) -> bool:
+    """Return True if title looks like a listicle / editorial rather than a product page."""
+    if len(title) > 100:
+        return True
+    tl = title.lower()
+    return any(phrase in tl for phrase in _JUNK_PHRASES)
+
+
+# ═══════════════════════════════════════════════
+# Nike SNKRS Launch Calendar Scraper (NEW)
+# ═══════════════════════════════════════════════
+async def scrape_nike_snkrs() -> list[dict]:
+    """Fetch upcoming Nike SNKRS drops from the launch calendar page via __NEXT_DATA__."""
+    drops = []
+    url = "https://www.nike.com/launch/upcoming"
+    try:
+        async with httpx.AsyncClient(headers=NIKE_HEADERS, timeout=30, follow_redirects=True) as client:
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                logger.warning(f"Nike SNKRS returned HTTP {resp.status_code}")
+                return drops
+
+            html = resp.text
+            nd_match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+            if not nd_match:
+                logger.warning("Nike SNKRS: __NEXT_DATA__ not found in page")
+                return drops
+
+            try:
+                data = json.loads(nd_match.group(1))
+            except json.JSONDecodeError as e:
+                logger.warning(f"Nike SNKRS: JSON parse error: {e}")
+                return drops
+
+            # Try multiple known paths for the product threads/items
+            items_raw = None
+
+            # Path 1: props.pageProps.initialState.product.threads.data.items (dict of products)
+            try:
+                threads_data = (
+                    data["props"]["pageProps"]["initialState"]["product"]["threads"]["data"]["items"]
+                )
+                if isinstance(threads_data, dict):
+                    items_raw = list(threads_data.values())
+                elif isinstance(threads_data, list):
+                    items_raw = threads_data
+            except (KeyError, TypeError):
+                pass
+
+            # Path 2: props.pageProps.initialState.launch.products
+            if not items_raw:
+                try:
+                    items_raw = data["props"]["pageProps"]["initialState"]["launch"]["products"]
+                except (KeyError, TypeError):
+                    pass
+
+            # Path 3: props.pageProps.products
+            if not items_raw:
+                try:
+                    items_raw = data["props"]["pageProps"]["products"]
+                except (KeyError, TypeError):
+                    pass
+
+            # Path 4: props.pageProps.data (generic)
+            if not items_raw:
+                try:
+                    items_raw = data["props"]["pageProps"]["data"]
+                except (KeyError, TypeError):
+                    pass
+
+            if not items_raw:
+                logger.warning("Nike SNKRS: Could not locate product items in __NEXT_DATA__")
+                return drops
+
+            logger.info(f"Nike SNKRS: Found {len(items_raw)} raw product threads")
+
+            now = datetime.utcnow()
+            cutoff = now + timedelta(days=90)
+
+            for product in items_raw:
+                if not isinstance(product, dict):
+                    continue
+
+                # ── Title / subtitle ──────────────────────────────────────────
+                title = product.get("title", "") or ""
+                subtitle = product.get("subtitle", "") or ""
+
+                # Combine for fallback brand detection
+                full_name = f"{title} {subtitle}".strip()
+
+                # Filter non-footwear: if subtitle is present and contains none of the
+                # footwear keywords, skip (jerseys, shorts, hoodies, etc.)
+                if subtitle:
+                    subtitle_lower = subtitle.lower()
+                    is_footwear = any(kw in subtitle_lower for kw in FOOTWEAR_SUBTITLE_KEYWORDS)
+                    if not is_footwear:
+                        logger.debug(f"Nike SNKRS: Skipping non-footwear — {title} | {subtitle}")
+                        continue
+
+                # Filter kids/toddler sizes
+                if subtitle:
+                    subtitle_lower = subtitle.lower()
+                    is_kids = any(kw in subtitle_lower for kw in KIDS_SUBTITLE_KEYWORDS)
+                    if is_kids:
+                        logger.debug(f"Nike SNKRS: Skipping kids item — {title} | {subtitle}")
+                        continue
+
+                # ── Product info array ────────────────────────────────────────
+                product_info = product.get("productInfo") or []
+                first_info = product_info[0] if product_info else {}
+
+                # ── Price ─────────────────────────────────────────────────────
+                merch_price = first_info.get("merchPrice") or {}
+                current_price = (
+                    merch_price.get("currentPrice")
+                    or merch_price.get("fullPrice")
+                    or product.get("currentPrice")
+                    or product.get("price")
+                )
+                retail_price = float(current_price) if current_price else None
+
+                # ── Style code ────────────────────────────────────────────────
+                merch_product = first_info.get("merchProduct") or {}
+                style_code = (
+                    merch_product.get("styleColor")
+                    or product.get("styleCode")
+                    or product.get("style_code")
+                    or ""
+                )
+
+                # ── Release date ──────────────────────────────────────────────
+                commerce_start = (
+                    product.get("commerceStartDate")
+                    or product.get("startSellDate")
+                    or first_info.get("launchView", {}).get("startEntryDate")
+                    or first_info.get("commerceStartDate")
+                    or ""
+                )
+                release_date: Optional[datetime] = None
+                if commerce_start:
+                    # Nike dates are typically ISO format: "2026-03-05T10:00:00.000Z"
+                    try:
+                        release_date = datetime.fromisoformat(commerce_start.replace("Z", "+00:00")).replace(tzinfo=None)
+                    except ValueError:
+                        release_date = _parse_date(commerce_start)
+
+                # Filter items releasing more than 90 days from now
+                if release_date and release_date > cutoff:
+                    logger.debug(f"Nike SNKRS: Skipping far-future item — {title} ({release_date.date()})")
+                    continue
+
+                # ── Image URL ─────────────────────────────────────────────────
+                published_content = product.get("publishedContent") or {}
+                cover_card = (
+                    published_content.get("properties", {}).get("coverCard", {}).get("properties", {})
+                )
+                image_url = (
+                    cover_card.get("squarishURL")
+                    or cover_card.get("portraitURL")
+                    or published_content.get("properties", {}).get("squarishURL")
+                    or product.get("imageUrl")
+                    or product.get("image_url")
+                    or ""
+                )
+
+                # ── Slug / source URL ─────────────────────────────────────────
+                slug = (
+                    product.get("slug")
+                    or published_content.get("properties", {}).get("slug")
+                    or ""
+                )
+                if slug and slug.lower() not in ("null", "none", ""):
+                    source_url = f"https://www.nike.com/launch/t/{slug}"
+                else:
+                    source_url = "https://www.nike.com/launch/upcoming"
+
+                # ── Brand detection ───────────────────────────────────────────
+                brand = _detect_brand(full_name)
+
+                # ── Colorway from subtitle ────────────────────────────────────
+                # Subtitle often reads "Men's Shoes · Colorway Info" or just colorway
+                colorway = subtitle if subtitle else ""
+
+                if not title:
+                    continue
+
+                drops.append({
+                    "name": title[:200],
+                    "brand": brand,
+                    "colorway": colorway[:200],
+                    "style_code": style_code,
+                    "retail_price": retail_price,
+                    "release_date": release_date,
+                    "image_url": image_url,
+                    "source": "Nike SNKRS",
+                    "source_url": source_url,
+                })
+
+            logger.info(f"Nike SNKRS: {len(drops)} footwear drops extracted after filtering")
+
+    except httpx.RequestError as e:
+        logger.error(f"Nike SNKRS network error: {e}")
+    except Exception as e:
+        logger.error(f"Nike SNKRS scraper error: {e}\n{traceback.format_exc()}")
+
+    return drops
+
+
+# ═══════════════════════════════════════════════
 # RSS Scraper 1: Kicks On Fire (richest, 100 items)
-# ===============================================
+# ═══════════════════════════════════════════════
 async def scrape_kicksonfire_rss() -> list[dict]:
     """Kicks On Fire RSS feed — large catalog with images and dates."""
     drops = []
@@ -125,10 +361,17 @@ async def scrape_kicksonfire_rss() -> list[dict]:
             items = root.findall('.//item')
             logger.info(f"KOF RSS: {len(items)} items")
 
+            now = datetime.utcnow()
+            cutoff = now + timedelta(days=90)
+
             for item in items:
                 title_el = item.find('title')
                 title = title_el.text if title_el is not None and title_el.text else ''
                 if not title or not _is_sneaker(title):
+                    continue
+
+                # Skip junk editorial articles
+                if _is_junk_article(title):
                     continue
 
                 link_el = item.find('link')
@@ -159,6 +402,10 @@ async def scrape_kicksonfire_rss() -> list[dict]:
                 )
                 release_date = _parse_date(date_m.group(1)) if date_m else None
 
+                # Skip items releasing more than 90 days out
+                if release_date and release_date > cutoff:
+                    continue
+
                 # Extract style code
                 style_m = re.search(r'Style\s*(?:Code|#)?:?\s*([A-Z0-9]{2,}[-]?\d*[-]?\d*)', content_html)
                 style_code = style_m.group(1) if style_m else ''
@@ -188,9 +435,9 @@ async def scrape_kicksonfire_rss() -> list[dict]:
     return drops
 
 
-# ===============================================
+# ═══════════════════════════════════════════════
 # RSS Scraper 2: Sneaker News (quality data with prices)
-# ===============================================
+# ═══════════════════════════════════════════════
 async def scrape_sneakernews_rss() -> list[dict]:
     """Sneaker News RSS feed — smaller but high quality with prices + images."""
     drops = []
@@ -205,6 +452,9 @@ async def scrape_sneakernews_rss() -> list[dict]:
             items = root.findall('.//item')
             logger.info(f"Sneaker News RSS: {len(items)} items")
 
+            now = datetime.utcnow()
+            cutoff = now + timedelta(days=90)
+
             for item in items:
                 title_el = item.find('title')
                 title = title_el.text if title_el is not None and title_el.text else ''
@@ -213,6 +463,10 @@ async def scrape_sneakernews_rss() -> list[dict]:
 
                 # Only include sneaker-related articles
                 if not _is_sneaker(title):
+                    continue
+
+                # Skip junk editorial articles
+                if _is_junk_article(title):
                     continue
 
                 link_el = item.find('link')
@@ -234,6 +488,10 @@ async def scrape_sneakernews_rss() -> list[dict]:
 
                 date_m = re.search(r'(\w+ \d{1,2},?\s*\d{4})', content_html)
                 release_date = _parse_date(date_m.group(1)) if date_m else None
+
+                # Skip items releasing more than 90 days out
+                if release_date and release_date > cutoff:
+                    continue
 
                 style_m = re.search(r'Style\s*(?:Code|#)?:?\s*([A-Z0-9]{2,}[-]?\d*[-]?\d*)', content_html)
                 style_code = style_m.group(1) if style_m else ''
@@ -259,9 +517,9 @@ async def scrape_sneakernews_rss() -> list[dict]:
     return drops
 
 
-# ===============================================
+# ═══════════════════════════════════════════════
 # RSS Scraper 3: Nice Kicks
-# ===============================================
+# ═══════════════════════════════════════════════
 async def scrape_nicekicks_rss() -> list[dict]:
     """Nice Kicks RSS feed."""
     drops = []
@@ -275,10 +533,17 @@ async def scrape_nicekicks_rss() -> list[dict]:
             items = root.findall('.//item')
             logger.info(f"Nice Kicks RSS: {len(items)} items")
 
+            now = datetime.utcnow()
+            cutoff = now + timedelta(days=90)
+
             for item in items:
                 title_el = item.find('title')
                 title = title_el.text if title_el is not None and title_el.text else ''
                 if not title or not _is_sneaker(title):
+                    continue
+
+                # Skip junk editorial articles
+                if _is_junk_article(title):
                     continue
 
                 link_el = item.find('link')
@@ -301,6 +566,10 @@ async def scrape_nicekicks_rss() -> list[dict]:
                 date_m = re.search(r'(\w+ \d{1,2},?\s*\d{4})', content_html)
                 release_date = _parse_date(date_m.group(1)) if date_m else None
 
+                # Skip items releasing more than 90 days out
+                if release_date and release_date > cutoff:
+                    continue
+
                 style_m = re.search(r'Style\s*(?:Code|#)?:?\s*([A-Z0-9]{2,}[-]?\d*[-]?\d*)', content_html)
                 style_code = style_m.group(1) if style_m else ''
 
@@ -321,94 +590,59 @@ async def scrape_nicekicks_rss() -> list[dict]:
     return drops
 
 
-# ===============================================
-# Curated seed data — real upcoming releases
-# ===============================================
+# ═══════════════════════════════════════════════
+# Curated seed data — real Nike SNKRS confirmed releases
+# ═══════════════════════════════════════════════
 def get_seed_drops() -> list[dict]:
-    """Curated list of confirmed upcoming sneaker releases to ensure the app always has data."""
+    """Confirmed upcoming Nike SNKRS releases to ensure the app always has data."""
     seed = [
-        {"name": "Air Jordan 4 Retro 'Lakeshow'", "brand": "Jordan", "colorway": "Court Purple/White",
-         "style_code": "FQ8213-100", "retail_price": 215, "release_date": datetime(2026, 3, 8),
-         "image_url": "https://images.stockx.com/images/Air-Jordan-4-Retro-Lakeshow-Product.jpg",
-         "source": "Curated", "production_number": 50000, "production_confidence": "Estimated",
-         "rarity_tier": "Semi-Limited"},
-        {"name": "Nike Air Max 95 OG 'Neon' 2026", "brand": "Nike", "colorway": "Black/Neon Yellow-Light Graphite",
-         "style_code": "CT1689-001", "retail_price": 185, "release_date": datetime(2026, 3, 1),
-         "image_url": "https://images.stockx.com/images/Nike-Air-Max-95-OG-Neon-2025-Product.jpg",
-         "source": "Curated", "production_number": 200000, "production_confidence": "Confirmed",
-         "rarity_tier": "Mass Release"},
-        {"name": "Air Jordan 1 Retro High OG 'Chicago Reimagined'", "brand": "Jordan", "colorway": "Varsity Red/White-Black",
-         "style_code": "DZ5485-612", "retail_price": 180, "release_date": datetime(2026, 3, 15),
-         "image_url": "https://images.stockx.com/images/Air-Jordan-1-Retro-High-OG-Chicago-Reimagined-Product.jpg",
-         "source": "Curated", "production_number": 15000, "production_confidence": "Rumored",
-         "rarity_tier": "Limited"},
-        {"name": "Nike Dunk Low 'Panda' Restock", "brand": "Nike", "colorway": "White/Black",
-         "style_code": "DD1391-100", "retail_price": 115, "release_date": datetime(2026, 3, 5),
-         "image_url": "https://images.stockx.com/images/Nike-Dunk-Low-Retro-White-Black-2021-Product.jpg",
-         "source": "Curated", "production_number": 500000, "production_confidence": "Confirmed",
-         "rarity_tier": "Mass Release"},
-        {"name": "Nike Kobe 9 Elite Low Protro 'Daybreak'", "brand": "Nike", "colorway": "Peach/Orange-White",
-         "style_code": "FQ3568-800", "retail_price": 200, "release_date": datetime(2026, 3, 22),
-         "image_url": "https://images.stockx.com/images/Nike-Kobe-9-Elite-Low-Protro-Daybreak-Product.jpg",
-         "source": "Curated", "production_number": 20000, "production_confidence": "Rumored",
-         "rarity_tier": "Limited"},
-        {"name": "adidas Yeezy Boost 350 V2 'Beluga Reflective'", "brand": "adidas", "colorway": "Stegry/Beluga/Solred",
-         "style_code": "IF3216", "retail_price": 230, "release_date": datetime(2026, 3, 29),
-         "image_url": "https://images.stockx.com/images/adidas-Yeezy-Boost-350-V2-Beluga-Reflective-Product.jpg",
-         "source": "Curated", "production_number": 35000, "production_confidence": "Estimated",
-         "rarity_tier": "Semi-Limited"},
-        {"name": "Air Jordan 13 Retro 'True Red' OG", "brand": "Jordan", "colorway": "White/True Red-Black",
-         "style_code": "414571-160", "retail_price": 200, "release_date": datetime(2026, 4, 5),
-         "image_url": "https://images.stockx.com/images/Air-Jordan-13-Retro-True-Red-Product.jpg",
-         "source": "Curated", "production_number": 40000, "production_confidence": "Rumored",
-         "rarity_tier": "Semi-Limited"},
-        {"name": "Nike Air Force 1 Low '07 'Triple White' 2026", "brand": "Nike", "colorway": "White/White",
-         "style_code": "CW2288-111", "retail_price": 115, "release_date": datetime(2026, 3, 1),
-         "image_url": "https://images.stockx.com/images/Nike-Air-Force-1-Low-White-07-Product.jpg",
-         "source": "Curated", "production_number": 1000000, "production_confidence": "Confirmed",
-         "rarity_tier": "Mass Release"},
-        {"name": "New Balance 2002R 'Protection Pack Rain Cloud'", "brand": "New Balance", "colorway": "Rain Cloud/Phantom",
-         "style_code": "M2002RDA", "retail_price": 150, "release_date": datetime(2026, 3, 12),
-         "image_url": "https://images.stockx.com/images/New-Balance-2002R-Protection-Pack-Rain-Cloud-Product.jpg",
-         "source": "Curated", "production_number": 60000, "production_confidence": "Estimated",
-         "rarity_tier": "Semi-Limited"},
-        {"name": "Nike LeBron 22 'All-Star' 2026", "brand": "Nike", "colorway": "Multi-Color/Gold",
-         "style_code": "FQ7123-900", "retail_price": 200, "release_date": datetime(2026, 3, 18),
-         "image_url": "https://images.stockx.com/images/Nike-LeBron-22-Product.jpg",
-         "source": "Curated", "production_number": 30000, "production_confidence": "Estimated",
-         "rarity_tier": "Semi-Limited"},
-        {"name": "Nike SB Dunk Low 'Court Purple'", "brand": "Nike", "colorway": "Court Purple/Black-White",
-         "style_code": "BQ6817-500", "retail_price": 115, "release_date": datetime(2026, 3, 10),
-         "image_url": "https://images.stockx.com/images/Nike-SB-Dunk-Low-Court-Purple-Product.jpg",
-         "source": "Curated", "production_number": 10000, "production_confidence": "Estimated",
-         "rarity_tier": "Limited"},
-        {"name": "Air Jordan 4 Retro 'Bred Reimagined'", "brand": "Jordan", "colorway": "Black/Cement Grey-Fire Red",
-         "style_code": "FV5029-006", "retail_price": 215, "release_date": datetime(2026, 4, 12),
-         "image_url": "https://images.stockx.com/images/Air-Jordan-4-Bred-Reimagined-Product.jpg",
-         "source": "Curated", "production_number": 60000, "production_confidence": "Rumored",
-         "rarity_tier": "Semi-Limited"},
-        {"name": "Nike Air Max 1 OG 'Big Bubble' Sport Red", "brand": "Nike", "colorway": "White/University Red-Neutral Grey",
-         "style_code": "DQ3989-100", "retail_price": 150, "release_date": datetime(2026, 3, 26),
-         "image_url": "https://images.stockx.com/images/Nike-Air-Max-1-86-OG-Big-Bubble-Sport-Red-Product.jpg",
-         "source": "Curated", "production_number": 75000, "production_confidence": "Estimated",
-         "rarity_tier": "Semi-Limited"},
-        {"name": "ASICS Gel-Kayano 14 'Silver/White'", "brand": "ASICS", "colorway": "White/Pure Silver",
-         "style_code": "1201A019-108", "retail_price": 140, "release_date": datetime(2026, 3, 20),
-         "image_url": "https://images.stockx.com/images/Asics-Gel-Kayano-14-Silver-White-Product.jpg",
-         "source": "Curated", "production_number": 45000, "production_confidence": "Estimated",
-         "rarity_tier": "Semi-Limited"},
-        {"name": "New Balance 550 'White Green'", "brand": "New Balance", "colorway": "White/Green",
-         "style_code": "BB550WT1", "retail_price": 110, "release_date": datetime(2026, 3, 7),
-         "image_url": "https://images.stockx.com/images/New-Balance-550-White-Green-Product.jpg",
-         "source": "Curated", "production_number": 100000, "production_confidence": "Estimated",
-         "rarity_tier": "Semi-Limited"},
+        {"name": "Nike Air Max 90 'Anthracite/Neon Yellow'", "brand": "Nike", "colorway": "Anthracite/Neon Yellow",
+         "style_code": "IQ0289-010", "retail_price": 135, "release_date": datetime(2026, 3, 5),
+         "image_url": "https://static.nike.com/a/images/f_auto,q_auto,c_limit,w_1200,g_south/51e86060-5beb-4bf3-8a79-c39dff901b71/air-max-90-anthracite-and-neon-yellow.webp",
+         "source": "Nike SNKRS"},
+        {"name": "Nike Air Max 95 OG 'Neon Yellow'", "brand": "Nike", "colorway": "Black/Neon Yellow-Light Graphite",
+         "style_code": "HM4740-001", "retail_price": 190, "release_date": datetime(2026, 3, 5),
+         "image_url": "https://static.nike.com/a/images/f_auto,q_auto,c_limit,w_1200,g_south/d68f96e7-3ed5-4e9b-92f3-24b882dcf7ff/air-max-95-og-neon-yellow1.webp",
+         "source": "Nike SNKRS"},
+        {"name": "Nike Air Max 95 'Big Bubble' Women's", "brand": "Nike", "colorway": "Neon Yellow",
+         "style_code": "IO9926-001", "retail_price": 190, "release_date": datetime(2026, 3, 5),
+         "image_url": "https://static.nike.com/a/images/f_auto,q_auto,c_limit,w_1200,g_south/503a0df7-99d8-4400-aeca-80c501048f97/womens-air-max-95-big-bubble-neon-yellow.webp",
+         "source": "Nike SNKRS"},
+        {"name": "Nike Air Griffey Max 1 'Varsity Royal/Volt'", "brand": "Nike", "colorway": "Varsity Royal/Volt",
+         "style_code": "DJ5161-400", "retail_price": 180, "release_date": datetime(2026, 3, 6),
+         "image_url": "https://static.nike.com/a/images/f_auto,q_auto,c_limit,w_1200,g_south/eda89542-829e-458b-b914-0075539619af/air-griffey-max-1-varsity-royal-and-volt.webp",
+         "source": "Nike SNKRS"},
+        {"name": "Air Jordan 1 Retro High OG 'Psychic Blue'", "brand": "Jordan", "colorway": "Psychic Blue/Pale Ivory",
+         "style_code": "FD2596-102", "retail_price": 185, "release_date": datetime(2026, 3, 7),
+         "image_url": "https://static.nike.com/a/images/f_auto,q_auto,c_limit,w_1200,g_south/a9b611e9-639c-4c0f-99d0-7e0f1500dc66/womens-air-jordan-1-high-og-psychic-blue-and-pale-ivory.webp",
+         "source": "Nike SNKRS"},
+        {"name": "Air Jordan 4 Retro 'Imperial Purple'", "brand": "Jordan", "colorway": "Imperial Purple",
+         "style_code": "FV5029-500", "retail_price": 220, "release_date": datetime(2026, 3, 7),
+         "image_url": "https://static.nike.com/a/images/f_auto,q_auto,c_limit,w_1200,g_south/03ce2bfe-f10d-4ec8-bc19-9fe92b35225b/air-jordan-4-imperial-purple.webp",
+         "source": "Nike SNKRS"},
+        {"name": "Nike Air Max Muse x Veneda Carter", "brand": "Nike", "colorway": "Racer Blue",
+         "style_code": "HV9929-100", "retail_price": 160, "release_date": datetime(2026, 3, 13),
+         "image_url": "https://static.nike.com/a/images/f_auto,q_auto,c_limit,w_1200,g_south/3c37bd39-56b7-4bb8-9b13-5620a69eaaa2/womens-air-max-muse-x-veneda-carter-racer-blue.webp",
+         "source": "Nike SNKRS"},
+        {"name": "Nike Air Foamposite Pro 'University Blue'", "brand": "Nike", "colorway": "University Blue/White",
+         "style_code": "HF0794-400", "retail_price": 240, "release_date": datetime(2026, 3, 27),
+         "image_url": "https://static.nike.com/a/images/f_auto,q_auto,c_limit,w_1200,g_south/a3bee569-dc21-42e2-a004-161cd7df817f/air-foamposite-pro-university-blue-and-white.webp",
+         "source": "Nike SNKRS"},
+        {"name": "LeBron XXIII Elite 'Good Intentions'", "brand": "Nike", "colorway": "Hyper Pink/Black",
+         "style_code": "IB9557-601", "retail_price": 235, "release_date": datetime(2026, 4, 3),
+         "image_url": "https://static.nike.com/a/images/f_auto,q_auto,c_limit,w_1200,g_south/30d3617a-aeef-4154-86bb-d8366ee0c5ea/lebron-xxiii-elite-good-intentions-hyper-pink-and-black.webp",
+         "source": "Nike SNKRS"},
+        {"name": "Nike ACG Ultrafly Trail 'Dutch Green'", "brand": "Nike", "colorway": "Dutch Green",
+         "style_code": "IR7317-300", "retail_price": 250, "release_date": datetime(2026, 3, 2),
+         "image_url": "https://static.nike.com/a/images/f_auto,q_auto,c_limit,w_1200,g_south/8f4810fe-d03d-444b-9ba5-27ca587e6327/acg-ultrafly-trail-dutch-green.webp",
+         "source": "Nike SNKRS"},
     ]
     return seed
 
 
-# ===============================================
+# ═══════════════════════════════════════════════
 # Scraper: Production intel from Hypebeast RSS
-# ===============================================
+# ═══════════════════════════════════════════════
 async def scrape_production_intel() -> list[dict]:
     leaks = []
     production_patterns = [
@@ -464,9 +698,9 @@ async def scrape_production_intel() -> list[dict]:
     return leaks
 
 
-# ===============================================
+# ═══════════════════════════════════════════════
 # Scraper: Resale prices (best effort)
-# ===============================================
+# ═══════════════════════════════════════════════
 async def scrape_resale_price(style_code: str, name: str) -> dict:
     result = {"stockx_price": None, "goat_price": None, "stockx_url": "", "goat_url": ""}
     if not style_code and not name:
@@ -512,9 +746,9 @@ async def scrape_resale_price(style_code: str, name: str) -> dict:
     return result
 
 
-# ===============================================
-# Scraper: Sole Retriever raffles
-# ===============================================
+# ═══════════════════════════════════════════════
+# Scraper: Sole Retriever raffles (fixed fallback)
+# ═══════════════════════════════════════════════
 async def scrape_raffles() -> list[dict]:
     raffles = []
     try:
@@ -540,7 +774,7 @@ async def scrape_raffles() -> list[dict]:
                 except Exception:
                     pass
 
-            # HTML fallback
+            # HTML fallback — look for structured raffle links
             if not raffles:
                 soup = BeautifulSoup(html, "html.parser")
                 for link in soup.select("a[href*='raffle'], a[href*='/raffles/']"):
@@ -555,22 +789,39 @@ async def scrape_raffles() -> list[dict]:
     except Exception as e:
         logger.error(f"Raffle scraper error: {e}")
 
-    # If scraper fails, provide curated raffle data
+    # If live scrape fails, fall back to curated Nike SNKRS raffle data with real URLs
     if not raffles:
+        logger.info("Raffle scraper returned no results — using curated SNKRS fallback data")
         raffles = [
-            {"shoe_name": "Air Jordan 4 'Lakeshow'", "store": "Foot Locker", "url": "https://www.footlocker.com/category/launches.html", "deadline": "March 7, 2026"},
-            {"shoe_name": "Air Jordan 4 'Lakeshow'", "store": "SNKRS App", "url": "https://www.nike.com/launch", "deadline": "March 8, 2026"},
-            {"shoe_name": "Nike Kobe 9 Elite Low 'Daybreak'", "store": "SNKRS App", "url": "https://www.nike.com/launch", "deadline": "March 22, 2026"},
-            {"shoe_name": "Air Jordan 1 High OG 'Chicago Reimagined'", "store": "END.", "url": "https://launches.endclothing.com/", "deadline": "March 14, 2026"},
-            {"shoe_name": "Nike SB Dunk Low 'Court Purple'", "store": "Concepts", "url": "https://cncpts.com/", "deadline": "March 9, 2026"},
+            {"shoe_name": "Air Jordan 4 Retro 'Imperial Purple'", "store": "Nike SNKRS",
+             "url": "https://www.nike.com/launch/t/air-jordan-4-imperial-purple",
+             "deadline": "March 7, 2026"},
+            {"shoe_name": "Air Jordan 1 Retro High OG 'Psychic Blue'", "store": "Nike SNKRS",
+             "url": "https://www.nike.com/launch/t/womens-air-jordan-1-high-og-psychic-blue-and-pale-ivory",
+             "deadline": "March 7, 2026"},
+            {"shoe_name": "Nike Air Max 95 OG 'Neon Yellow'", "store": "Nike SNKRS",
+             "url": "https://www.nike.com/launch/t/air-max-95-og-neon-yellow1",
+             "deadline": "March 5, 2026"},
+            {"shoe_name": "Nike Air Max 90 'Anthracite/Neon Yellow'", "store": "Nike SNKRS",
+             "url": "https://www.nike.com/launch/t/air-max-90-anthracite-and-neon-yellow",
+             "deadline": "March 5, 2026"},
+            {"shoe_name": "Nike Air Griffey Max 1 'Varsity Royal'", "store": "Nike SNKRS",
+             "url": "https://www.nike.com/launch/t/air-griffey-max-1-varsity-royal-and-volt",
+             "deadline": "March 6, 2026"},
+            {"shoe_name": "Nike Air Foamposite Pro 'University Blue'", "store": "Nike SNKRS",
+             "url": "https://www.nike.com/launch/t/air-foamposite-pro-university-blue-and-white",
+             "deadline": "March 27, 2026"},
+            {"shoe_name": "LeBron XXIII Elite 'Good Intentions'", "store": "Nike SNKRS",
+             "url": "https://www.nike.com/launch/t/lebron-xxiii-elite-good-intentions-hyper-pink-and-black",
+             "deadline": "April 3, 2026"},
         ]
 
     return raffles
 
 
-# ===============================================
+# ═══════════════════════════════════════════════
 # Orchestrator — run all and save to DB
-# ===============================================
+# ═══════════════════════════════════════════════
 async def run_drop_scrapers():
     logger.info("=== Starting drop scraper run ===")
     db = SessionLocal()
@@ -580,6 +831,7 @@ async def run_drop_scrapers():
             scrape_kicksonfire_rss(),
             scrape_sneakernews_rss(),
             scrape_nicekicks_rss(),
+            scrape_nike_snkrs(),
             return_exceptions=True,
         )
         for r in results:
@@ -592,7 +844,7 @@ async def run_drop_scrapers():
 
         # If scrapers returned nothing, use seed data
         existing_count = db.query(SneakerDrop).count()
-        if len(all_drops) < 5 and existing_count < 10:
+        if len(all_drops) < 5 and existing_count < 5:
             logger.info("Low scraper results — adding seed data")
             all_drops.extend(get_seed_drops())
 
