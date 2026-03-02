@@ -13,8 +13,9 @@ import {
   deletePortfolioItem, getLeaks, addLeak, getRarityDistribution,
   getRaffles, generateBookmarklet, getRaffleTemplates,
   triggerScrapers, getScraperLogs, getDigest, exportData,
+  getOracleBatch, getOracleVerdictByName,
   type Drop, type PortfolioItem, type Leak, type PortfolioStats,
-  type DropStats, type Raffle,
+  type DropStats, type Raffle, type OracleVerdict,
 } from "@/lib/api";
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid,
@@ -78,13 +79,14 @@ const RARITY_COLORS: Record<string, string> = {
 };
 
 // ─── Tab definitions ──────────────────────────
-type Tab = "dashboard" | "drops" | "rarity" | "portfolio" | "cop" | "digest";
+type Tab = "dashboard" | "drops" | "rarity" | "portfolio" | "cop" | "oracle" | "digest";
 const TABS: { id: Tab; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "drops", label: "Drops Calendar", icon: CalendarDays },
   { id: "rarity", label: "Rarity Intel", icon: Diamond },
   { id: "portfolio", label: "Portfolio", icon: Briefcase },
   { id: "cop", label: "Cop Assistant", icon: Bot },
+  { id: "oracle", label: "Oracle", icon: Zap },
   { id: "digest", label: "Digest", icon: FileText },
 ];
 
@@ -250,6 +252,7 @@ export default function SoleOracle() {
           {tab === "rarity" && <RarityTab />}
           {tab === "portfolio" && <PortfolioTab />}
           {tab === "cop" && <CopTab />}
+          {tab === "oracle" && <OracleTab />}
           {tab === "digest" && <DigestTab />}
         </main>
 
@@ -979,6 +982,189 @@ function DigestTab() {
 
 
 // ═══════════════════════════════════════════════
+// ORACLE TAB
+// ═══════════════════════════════════════════════
+function OracleTab() {
+  const [verdicts, setVerdicts] = useState<OracleVerdict[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [searchName, setSearchName] = useState("");
+  const [searchResult, setSearchResult] = useState<OracleVerdict | null>(null);
+  const [searching, setSearching] = useState(false);
+
+  useEffect(() => {
+    getOracleBatch(30).then(setVerdicts).catch(() => {}).finally(() => setLoading(false));
+  }, []);
+
+  const handleSearch = async () => {
+    if (!searchName.trim()) return;
+    setSearching(true);
+    try {
+      const result = await getOracleVerdictByName(searchName.trim());
+      setSearchResult(result);
+    } catch { setSearchResult(null); }
+    setSearching(false);
+  };
+
+  const verdictColor = (v: string) =>
+    v === "COP" ? "text-green-400" : v === "PASS" ? "text-red-400" : "text-yellow-400";
+  const verdictBg = (v: string) =>
+    v === "COP" ? "bg-green-500/10 border-green-500/30" : v === "PASS" ? "bg-red-500/10 border-red-500/30" : "bg-yellow-500/10 border-yellow-500/30";
+  const riskColor = (r: string) =>
+    r === "Low" ? "text-green-400" : r === "Medium" ? "text-yellow-400" : r === "High" ? "text-red-400" : "text-red-500";
+
+  return (
+    <div className="space-y-6">
+      {/* Search */}
+      <div className="bg-bg-card border border-white/5 rounded-xl p-4 md:p-5">
+        <h3 className="font-display font-bold mb-3">Should I Cop?</h3>
+        <p className="text-sm text-gray-400 mb-4">Type any sneaker name and Oracle will analyze scarcity, hype, resale history, and market signals to give you a data-driven verdict.</p>
+        <div className="flex gap-2">
+          <div className="relative flex-1 min-w-0">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+            <input
+              type="text"
+              placeholder="e.g. Air Jordan 4 Bred, Kobe 9 Protro, Travis Scott..."
+              value={searchName}
+              onChange={e => setSearchName(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && handleSearch()}
+              className="w-full pl-10 pr-4 py-2.5 bg-bg border border-white/10 rounded-lg text-sm focus:border-accent focus:outline-none"
+            />
+          </div>
+          <button
+            onClick={handleSearch}
+            disabled={searching}
+            className="bg-accent text-black font-semibold px-5 py-2.5 rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50 flex-shrink-0"
+          >
+            {searching ? "Analyzing..." : "Ask Oracle"}
+          </button>
+        </div>
+      </div>
+
+      {/* Search Result */}
+      {searchResult && (
+        <div className={cn("border rounded-xl p-4 md:p-6", verdictBg(searchResult.verdict))}>
+          <div className="flex flex-col sm:flex-row justify-between items-start gap-4">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-3 mb-2">
+                <span className={cn("text-3xl md:text-4xl font-display font-black", verdictColor(searchResult.verdict))}>
+                  {searchResult.verdict}
+                </span>
+                <span className="text-sm text-gray-400">{searchResult.confidence}% confidence</span>
+              </div>
+              <h3 className="font-semibold text-lg mb-1 truncate">{searchResult.drop_name}</h3>
+              {!searchResult.matched && (
+                <p className="text-xs text-gray-500 mb-2">Not in drop calendar — verdict based on name analysis only</p>
+              )}
+              <div className="flex flex-wrap gap-3 text-sm text-gray-400 mb-4">
+                <span>~{searchResult.production_estimate.toLocaleString()} pairs ({searchResult.production_confidence})</span>
+                <span className={riskColor(searchResult.risk_tier)}>{searchResult.risk_tier} Risk</span>
+              </div>
+              {searchResult.roi_low != null && searchResult.roi_high != null && (
+                <div className="mb-4">
+                  <p className="text-xs text-gray-500 uppercase mb-1">Projected ROI</p>
+                  <p className="text-xl font-bold tabular-nums">
+                    <span className={searchResult.roi_low >= 0 ? "text-green-400" : "text-red-400"}>
+                      {searchResult.roi_low >= 0 ? "+" : ""}{searchResult.roi_low}%
+                    </span>
+                    <span className="text-gray-600 mx-2">to</span>
+                    <span className={searchResult.roi_high >= 0 ? "text-green-400" : "text-red-400"}>
+                      +{searchResult.roi_high}%
+                    </span>
+                  </p>
+                  {searchResult.projected_resale_low != null && (
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      Resale: ${searchResult.projected_resale_low.toLocaleString()} — ${searchResult.projected_resale_high?.toLocaleString()}
+                    </p>
+                  )}
+                </div>
+              )}
+              <div className="space-y-1.5">
+                {searchResult.reasoning.map((r, i) => (
+                  <p key={i} className="text-sm text-gray-300 flex items-start gap-2">
+                    <span className="text-accent mt-0.5">▸</span> {r}
+                  </p>
+                ))}
+              </div>
+            </div>
+
+            {/* Signal bars */}
+            <div className="w-full sm:w-48 flex-shrink-0 bg-bg/50 rounded-lg p-3">
+              <p className="text-xs text-gray-500 uppercase mb-2">Signals</p>
+              {Object.entries(searchResult.signals).map(([key, val]) => (
+                <div key={key} className="mb-2">
+                  <div className="flex justify-between text-xs mb-0.5">
+                    <span className="text-gray-400 capitalize">{key.replace("_", " ")}</span>
+                    <span className="tabular-nums">{val}</span>
+                  </div>
+                  <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-accent rounded-full transition-all"
+                      style={{ width: `${Math.min(100, (val as number) * 10)}%` }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Batch Verdicts */}
+      <div>
+        <h3 className="font-display font-bold mb-4">All Drop Verdicts</h3>
+        {loading ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {[1,2,3,4,5,6].map(i => (
+              <div key={i} className="bg-bg-card border border-white/5 rounded-xl h-52 animate-pulse" />
+            ))}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {verdicts.map((v, i) => (
+              <div key={i} className={cn("border rounded-xl p-4 transition hover:border-white/20", verdictBg(v.verdict))}>
+                <div className="flex items-start justify-between mb-3">
+                  <VerdictBadge verdict={v.verdict} confidence={v.confidence} />
+                  <span className={cn("text-xs font-medium", riskColor(v.risk_tier))}>{v.risk_tier} Risk</span>
+                </div>
+
+                <h4 className="font-semibold text-sm leading-tight line-clamp-2 mb-2">{v.drop_name}</h4>
+
+                <div className="flex items-center gap-3 text-xs text-gray-400 mb-3">
+                  {v.retail_price && <span>{formatPrice(v.retail_price)}</span>}
+                  <span>~{v.production_estimate.toLocaleString()} pairs</span>
+                </div>
+
+                {v.roi_low != null && v.roi_high != null && (
+                  <div className="text-sm font-bold tabular-nums mb-2">
+                    <span className={v.roi_low >= 0 ? "text-green-400" : "text-red-400"}>
+                      {v.roi_low >= 0 ? "+" : ""}{v.roi_low}%
+                    </span>
+                    <span className="text-gray-600 mx-1.5">to</span>
+                    <span className={v.roi_high >= 0 ? "text-green-400" : "text-red-400"}>
+                      +{v.roi_high}%
+                    </span>
+                    <span className="text-xs font-normal text-gray-500 ml-1">projected ROI</span>
+                  </div>
+                )}
+
+                <div className="space-y-1 mt-2 border-t border-white/5 pt-2">
+                  {v.reasoning.slice(0, 2).map((r, j) => (
+                    <p key={j} className="text-[11px] text-gray-400 leading-snug">
+                      <span className="text-accent">▸</span> {r}
+                    </p>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+// ═══════════════════════════════════════════════
 // SHARED COMPONENTS
 // ═══════════════════════════════════════════════
 function KpiCard({ label, value, sub, accent }: { label: string; value: string; sub?: string; accent?: boolean }) {
@@ -988,6 +1174,17 @@ function KpiCard({ label, value, sub, accent }: { label: string; value: string; 
       <p className={cn("text-lg md:text-2xl font-bold tabular-nums truncate", accent && "text-green-400")}>{value}</p>
       {sub && <p className={cn("text-xs md:text-sm mt-0.5 md:mt-1 truncate", accent ? "text-green-400/70" : "text-gray-500")}>{sub}</p>}
     </div>
+  );
+}
+
+function VerdictBadge({ verdict, confidence }: { verdict: string; confidence: number }) {
+  const color = verdict === "COP" ? "bg-green-500/20 text-green-400 border-green-500/40"
+    : verdict === "PASS" ? "bg-red-500/20 text-red-400 border-red-500/40"
+    : "bg-yellow-500/20 text-yellow-400 border-yellow-500/40";
+  return (
+    <span className={cn("px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border", color)}>
+      {verdict} {confidence}%
+    </span>
   );
 }
 
@@ -1044,7 +1241,7 @@ function DropCard({ drop, expanded }: { drop: Drop; expanded?: boolean }) {
         {/* Production */}
         {expanded && (
           <div className="flex items-center justify-between text-xs text-gray-500 pt-1 border-t border-white/5">
-            <span>{drop.production_number ? `${drop.production_number.toLocaleString()} pairs` : "Production TBD"}</span>
+            <span>{drop.production_number ? `~${drop.production_number.toLocaleString()} pairs` : "Production TBD"}</span>
             <span className={cn("px-1.5 py-0.5 rounded text-[10px] font-medium border",
               drop.production_confidence === "Confirmed" ? "bg-green-500/20 text-green-400 border-green-500/30" :
               drop.production_confidence === "Rumored" ? "bg-yellow-500/20 text-yellow-400 border-yellow-500/30" :
