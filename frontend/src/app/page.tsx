@@ -5,7 +5,7 @@ import {
   LayoutDashboard, CalendarDays, Diamond, Briefcase,
   Bot, FileText, RefreshCw, ChevronLeft, Menu, Sun, Moon,
   TrendingUp, TrendingDown, Clock, ExternalLink, Copy,
-  Plus, Trash2, Search, Filter, Download, Flame, Zap,
+  Plus, Trash2, Search, Filter, Download, Flame, Zap, X,
 } from "lucide-react";
 import {
   getDrops, getHotDrops, getDropStats, getPortfolio,
@@ -13,7 +13,7 @@ import {
   deletePortfolioItem, getLeaks, addLeak, getRarityDistribution,
   getRaffles, generateBookmarklet, getRaffleTemplates,
   triggerScrapers, getScraperLogs, getDigest, exportData,
-  getOracleBatch, getOracleVerdictByName,
+  getOracleBatch, getOracleVerdictByName, getOracleVerdict,
   type Drop, type PortfolioItem, type Leak, type PortfolioStats,
   type DropStats, type Raffle, type OracleVerdict,
 } from "@/lib/api";
@@ -90,6 +90,174 @@ const TABS: { id: Tab; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "digest", label: "Digest", icon: FileText },
 ];
 
+// ─── Drop Detail Drawer ──────────────────────
+function DropDetailDrawer({ drop, onClose }: { drop: Drop; onClose: () => void }) {
+  const [verdict, setVerdict] = useState<OracleVerdict | null>(null);
+  const [loadingVerdict, setLoadingVerdict] = useState(true);
+
+  useEffect(() => {
+    setLoadingVerdict(true);
+    getOracleVerdict(drop.id)
+      .then(setVerdict)
+      .catch(() => {})
+      .finally(() => setLoadingVerdict(false));
+  }, [drop.id]);
+
+  return (
+    <>
+      {/* Backdrop */}
+      <div className="fixed inset-0 bg-black/60 z-50" onClick={onClose} />
+
+      {/* Drawer */}
+      <div className="fixed inset-y-0 right-0 w-full max-w-md bg-bg-card border-l border-white/5 z-50 overflow-y-auto animate-slide-in">
+        {/* Header */}
+        <div className="sticky top-0 bg-bg-card/95 backdrop-blur border-b border-white/5 p-4 flex items-center justify-between z-10">
+          <h2 className="font-display font-bold text-lg truncate pr-4">{drop.name}</h2>
+          <button onClick={onClose} className="p-2 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white flex-shrink-0">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="p-4 space-y-5">
+          {/* Image */}
+          <div className="bg-bg rounded-xl p-6 flex items-center justify-center">
+            {drop.image_url && drop.image_url.startsWith("http") ? (
+              <img src={drop.image_url} alt={drop.name} className="max-h-56 max-w-full object-contain" />
+            ) : (
+              <div className="h-40 w-full flex items-center justify-center text-gray-600">No Image Available</div>
+            )}
+          </div>
+
+          {/* Oracle Verdict */}
+          <div className="bg-bg rounded-xl p-4">
+            <h3 className="text-xs text-gray-500 uppercase mb-3 font-medium">Oracle Verdict</h3>
+            {loadingVerdict ? (
+              <div className="flex items-center gap-2 text-gray-500 text-sm">
+                <RefreshCw size={14} className="animate-spin" /> Analyzing...
+              </div>
+            ) : verdict ? (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <VerdictBadge verdict={verdict.verdict} confidence={verdict.confidence} />
+                  <span className="text-xs text-gray-500">Risk: {verdict.risk_tier}</span>
+                </div>
+                {verdict.projected_resale_low != null && verdict.projected_resale_high != null && (
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-400">Projected Resale</span>
+                    <span className="font-semibold text-accent">
+                      {formatPrice(verdict.projected_resale_low)} – {formatPrice(verdict.projected_resale_high)}
+                    </span>
+                  </div>
+                )}
+                {verdict.roi_low != null && verdict.roi_high != null && (
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-400">ROI Range</span>
+                    <span className={cn("font-semibold", verdict.roi_low >= 0 ? "text-green-400" : "text-red-400")}>
+                      {verdict.roi_low >= 0 ? "+" : ""}{verdict.roi_low}% to +{verdict.roi_high}%
+                    </span>
+                  </div>
+                )}
+                {verdict.reasoning.length > 0 && (
+                  <div className="space-y-1.5 pt-2 border-t border-white/5">
+                    {verdict.reasoning.map((r, i) => (
+                      <p key={i} className="text-xs text-gray-400 flex gap-2">
+                        <span className="text-accent flex-shrink-0">→</span>
+                        {r}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500">Verdict unavailable</p>
+            )}
+          </div>
+
+          {/* Details Grid */}
+          <div className="grid grid-cols-2 gap-3">
+            <DetailItem label="Brand" value={drop.brand} />
+            <DetailItem label="Retail Price" value={formatPrice(drop.retail_price)} />
+            <DetailItem label="Release Date" value={formatDate(drop.release_date)} />
+            <DetailItem label="Countdown" value={countdown(drop.release_date)} accent />
+            <DetailItem label="Colorway" value={drop.colorway || "—"} />
+            <DetailItem label="Style Code" value={drop.style_code || "—"} />
+            <DetailItem label="Rarity" value={drop.rarity_tier || "Unknown"} />
+            <DetailItem label="Production" value={drop.production_number ? `~${drop.production_number.toLocaleString()}` : "TBD"} />
+            <DetailItem label="Heat Index" value={`${drop.heat_index}/10`} />
+            <DetailItem label="Scarcity" value={`${drop.scarcity_score}/10`} />
+          </div>
+
+          {/* Resale Prices */}
+          {(drop.stockx_price || drop.goat_price) && (
+            <div className="bg-bg rounded-xl p-4">
+              <h3 className="text-xs text-gray-500 uppercase mb-3 font-medium">Resale Prices</h3>
+              <div className="space-y-2">
+                {drop.stockx_price && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-gray-400">StockX</span>
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-sm">{formatPrice(drop.stockx_price)}</span>
+                      {drop.stockx_url && (
+                        <a href={drop.stockx_url} target="_blank" rel="noopener noreferrer" className="text-accent">
+                          <ExternalLink size={12} />
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {drop.goat_price && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-gray-400">GOAT</span>
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-sm">{formatPrice(drop.goat_price)}</span>
+                      {drop.goat_url && (
+                        <a href={drop.goat_url} target="_blank" rel="noopener noreferrer" className="text-accent">
+                          <ExternalLink size={12} />
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {drop.retail_price && (drop.stockx_price || drop.goat_price) && (
+                  <div className="flex items-center justify-between pt-2 border-t border-white/5">
+                    <span className="text-sm text-gray-400">Resale Multiple</span>
+                    <span className={cn("font-semibold text-sm",
+                      drop.resale_multiple >= 1.5 ? "text-green-400" :
+                      drop.resale_multiple >= 1.0 ? "text-yellow-400" : "text-red-400"
+                    )}>
+                      {drop.resale_multiple.toFixed(2)}x
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Source & Metadata */}
+          <div className="bg-bg rounded-xl p-4">
+            <h3 className="text-xs text-gray-500 uppercase mb-3 font-medium">Source</h3>
+            <div className="space-y-1 text-sm">
+              <p className="text-gray-400">{drop.source}</p>
+              {drop.production_confidence && (
+                <p className="text-gray-500 text-xs">Production confidence: {drop.production_confidence}</p>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function DetailItem({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+  return (
+    <div className="bg-bg rounded-lg p-3">
+      <p className="text-[10px] text-gray-500 uppercase mb-1">{label}</p>
+      <p className={cn("text-sm font-medium truncate", accent ? "text-accent" : "")}>{value}</p>
+    </div>
+  );
+}
+
 // ─── Main App ─────────────────────────────────
 export default function SoleOracle() {
   const [tab, setTab] = useState<Tab>("dashboard");
@@ -97,6 +265,7 @@ export default function SoleOracle() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [darkMode, setDarkMode] = useState(true);
   const [clock, setClock] = useState("");
+  const [selectedDrop, setSelectedDrop] = useState<Drop | null>(null);
 
   useEffect(() => {
     const tick = () => setClock(new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
@@ -247,8 +416,8 @@ export default function SoleOracle() {
 
         {/* Content */}
         <main className="flex-1 overflow-y-auto p-3 md:p-6">
-          {tab === "dashboard" && <DashboardTab />}
-          {tab === "drops" && <DropsTab />}
+          {tab === "dashboard" && <DashboardTab onSelectDrop={setSelectedDrop} />}
+          {tab === "drops" && <DropsTab onSelectDrop={setSelectedDrop} />}
           {tab === "rarity" && <RarityTab />}
           {tab === "portfolio" && <PortfolioTab />}
           {tab === "cop" && <CopTab />}
@@ -273,6 +442,11 @@ export default function SoleOracle() {
           ))}
         </nav>
       </div>
+
+      {/* Drop Detail Drawer */}
+      {selectedDrop && (
+        <DropDetailDrawer drop={selectedDrop} onClose={() => setSelectedDrop(null)} />
+      )}
     </div>
   );
 }
@@ -281,7 +455,7 @@ export default function SoleOracle() {
 // ═══════════════════════════════════════════════
 // DASHBOARD TAB
 // ═══════════════════════════════════════════════
-function DashboardTab() {
+function DashboardTab({ onSelectDrop }: { onSelectDrop: (d: Drop) => void }) {
   const [stats, setStats] = useState<PortfolioStats | null>(null);
   const [dropStats, setDropStats] = useState<DropStats | null>(null);
   const [hotDrops, setHotDrops] = useState<Drop[]>([]);
@@ -322,7 +496,7 @@ function DashboardTab() {
         <h2 className="text-lg font-display font-bold mb-4">Hot Drops This Week</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {hotDrops.map(drop => (
-            <DropCard key={drop.id} drop={drop} />
+            <DropCard key={drop.id} drop={drop} onSelect={onSelectDrop} />
           ))}
           {hotDrops.length === 0 && (
             <div className="col-span-3 text-center py-12 text-gray-500">
@@ -371,7 +545,7 @@ function DashboardTab() {
 // ═══════════════════════════════════════════════
 // DROPS CALENDAR TAB
 // ═══════════════════════════════════════════════
-function DropsTab() {
+function DropsTab({ onSelectDrop }: { onSelectDrop: (d: Drop) => void }) {
   const [drops, setDrops] = useState<Drop[]>([]);
   const [loading, setLoading] = useState(true);
   const [brand, setBrand] = useState("");
@@ -443,7 +617,7 @@ function DropsTab() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {drops.map(drop => (
-            <DropCard key={drop.id} drop={drop} expanded />
+            <DropCard key={drop.id} drop={drop} expanded onSelect={onSelectDrop} />
           ))}
           {drops.length === 0 && (
             <div className="col-span-3 text-center py-16 text-gray-500">
@@ -756,7 +930,15 @@ function CopTab() {
   const [copied, setCopied] = useState("");
 
   useEffect(() => {
-    getRaffles().then(setRaffles).catch(() => {});
+    getRaffles().then(data => {
+      // Sort by deadline date — closest first
+      const sorted = [...data].sort((a, b) => {
+        const dateA = a.deadline ? new Date(a.deadline).getTime() : Infinity;
+        const dateB = b.deadline ? new Date(b.deadline).getTime() : Infinity;
+        return dateA - dateB;
+      });
+      setRaffles(sorted);
+    }).catch(() => {});
     getRaffleTemplates("Sneakerhead", "10").then(setTemplates).catch(() => {});
   }, []);
 
@@ -1188,9 +1370,12 @@ function VerdictBadge({ verdict, confidence }: { verdict: string; confidence: nu
   );
 }
 
-function DropCard({ drop, expanded }: { drop: Drop; expanded?: boolean }) {
+function DropCard({ drop, expanded, onSelect }: { drop: Drop; expanded?: boolean; onSelect?: (d: Drop) => void }) {
   return (
-    <div className="bg-bg-card border border-white/5 rounded-xl overflow-hidden hover:border-white/10 transition group">
+    <div
+      className="bg-bg-card border border-white/5 rounded-xl overflow-hidden hover:border-white/10 transition group cursor-pointer"
+      onClick={() => onSelect?.(drop)}
+    >
       {/* Header with rarity + heat */}
       <div className="relative p-4 pb-0">
         <div className="flex justify-between items-start">
