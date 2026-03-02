@@ -21,9 +21,14 @@ from scrapers import (
     scrape_raffles, scrape_resale_price,
     _compute_heat_index, _classify_rarity,
 )
+from oracle import (
+    generate_verdict, generate_verdict_from_drop,
+    estimate_production,
+)
 
 logger = logging.getLogger("soleoracle")
 
+# ── APScheduler ─────────────────────────────────────────────
 scheduler = AsyncIOScheduler()
 
 
@@ -40,6 +45,7 @@ def _wrap(coro_fn):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Startup
     logger.info("SoleOracle backend starting up...")
     scheduler.add_job(_wrap(run_drop_scrapers), "interval", hours=1, id="drops_hourly",
                       next_run_time=datetime.utcnow() + timedelta(seconds=10))
@@ -50,8 +56,13 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_wrap(take_portfolio_snapshot), "interval", hours=24, id="snapshot_daily")
     scheduler.start()
     logger.info("APScheduler started with 4 jobs")
+
+    # Run initial scrape in background
     asyncio.ensure_future(run_drop_scrapers())
+
     yield
+
+    # Shutdown
     scheduler.shutdown(wait=False)
     logger.info("SoleOracle backend shutting down")
 
@@ -72,6 +83,8 @@ app.add_middleware(
 )
 
 
+# ── Pydantic Schemas ─────────────────────────────────────
+
 class DropOut(BaseModel):
     id: int
     name: str
@@ -82,7 +95,7 @@ class DropOut(BaseModel):
     release_date: Optional[datetime]
     release_time: str
     image_url: str
-    where_to_buy: str
+    where_to_buy: str  # JSON string
     raffle_links: str
     production_number: Optional[int]
     production_confidence: str
@@ -157,10 +170,15 @@ class LeakOut(BaseModel):
         from_attributes = True
 
 
+# ── API Routes ────────────────────────────────────────────
+
+# --- Health ---
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "service": "SoleOracle", "timestamp": datetime.utcnow().isoformat()}
 
+
+# --- DROPS ---
 
 @app.get("/api/drops/hot", response_model=list[DropOut])
 async def get_hot_drops(limit: int = 5, db: Session = Depends(get_db)):
@@ -174,6 +192,7 @@ async def get_drop_stats(db: Session = Depends(get_db)):
     rarity_dist = db.query(SneakerDrop.rarity_tier, func.count(SneakerDrop.id)).group_by(SneakerDrop.rarity_tier).all()
     avg_heat = db.query(func.avg(SneakerDrop.heat_index)).scalar() or 0
     avg_price = db.query(func.avg(SneakerDrop.retail_price)).scalar() or 0
+
     return {
         "total_drops": total,
         "brands": {b: c for b, c in brands},
@@ -200,6 +219,7 @@ async def get_drops(
         q = q.filter(SneakerDrop.rarity_tier == rarity)
     if search:
         q = q.filter(SneakerDrop.name.ilike(f"%{search}%"))
+
     if sort == "date":
         q = q.order_by(SneakerDrop.release_date.asc())
     elif sort == "heat":
@@ -210,6 +230,7 @@ async def get_drops(
         q = q.order_by(SneakerDrop.production_number.asc())
     else:
         q = q.order_by(SneakerDrop.name.asc())
+
     return q.offset(offset).limit(limit).all()
 
 
@@ -221,6 +242,7 @@ async def get_drop(drop_id: int, db: Session = Depends(get_db)):
     return drop
 
 
+# --- PORTFOLIO ---
 @app.get("/api/portfolio", response_model=list[PortfolioItemOut])
 async def get_portfolio(db: Session = Depends(get_db)):
     return db.query(PortfolioItem).order_by(desc(PortfolioItem.created_at)).all()
@@ -234,17 +256,26 @@ async def add_portfolio_item(item: PortfolioItemIn, db: Session = Depends(get_db
             purchase_dt = datetime.fromisoformat(item.purchase_date)
         except Exception:
             purchase_dt = None
+
     db_item = PortfolioItem(
-        name=item.name, brand=item.brand, size=item.size,
-        purchase_price=item.purchase_price, purchase_date=purchase_dt,
-        condition=item.condition, image_url=item.image_url,
-        style_code=item.style_code, notes=item.notes,
-        current_value=item.purchase_price,
+        name=item.name,
+        brand=item.brand,
+        size=item.size,
+        purchase_price=item.purchase_price,
+        purchase_date=purchase_dt,
+        condition=item.condition,
+        image_url=item.image_url,
+        style_code=item.style_code,
+        notes=item.notes,
+        current_value=item.purchase_price,  # initial value = purchase price
     )
     db.add(db_item)
     db.commit()
     db.refresh(db_item)
+
+    # Trigger async resale lookup
     asyncio.ensure_future(_update_item_resale(db_item.id, item.style_code, item.name))
+
     return db_item
 
 
@@ -263,10 +294,13 @@ async def get_portfolio_stats(db: Session = Depends(get_db)):
     items = db.query(PortfolioItem).all()
     if not items:
         return {"total_invested": 0, "current_value": 0, "total_pnl": 0, "pnl_pct": 0, "best_performer": None, "count": 0}
+
     total_cost = sum(i.purchase_price for i in items)
     total_val = sum(i.current_value or i.purchase_price for i in items)
     pnl = total_val - total_cost
+
     best = max(items, key=lambda i: (i.current_value or i.purchase_price) - i.purchase_price)
+
     return {
         "total_invested": round(total_cost, 2),
         "current_value": round(total_val, 2),
@@ -291,6 +325,7 @@ async def get_portfolio_snapshots(days: int = 30, db: Session = Depends(get_db))
 
 
 async def _update_item_resale(item_id: int, style_code: str, name: str):
+    """Background task to update resale price for a portfolio item."""
     try:
         await asyncio.sleep(2)
         prices = await scrape_resale_price(style_code, name)
@@ -314,6 +349,7 @@ async def _update_item_resale(item_id: int, style_code: str, name: str):
         logger.error(f"Item resale update error: {e}")
 
 
+# --- PRODUCTION LEAKS ---
 @app.get("/api/leaks", response_model=list[LeakOut])
 async def get_leaks(db: Session = Depends(get_db)):
     return db.query(ProductionLeak).order_by(ProductionLeak.production_number.asc()).all()
@@ -322,12 +358,17 @@ async def get_leaks(db: Session = Depends(get_db)):
 @app.post("/api/leaks", response_model=LeakOut)
 async def add_leak(leak: LeakIn, db: Session = Depends(get_db)):
     db_leak = ProductionLeak(
-        shoe_name=leak.shoe_name, production_number=leak.production_number,
-        source_url=leak.source_url, confidence=leak.confidence, submitted_by="user",
+        shoe_name=leak.shoe_name,
+        production_number=leak.production_number,
+        source_url=leak.source_url,
+        confidence=leak.confidence,
+        submitted_by="user",
     )
     db.add(db_leak)
     db.commit()
     db.refresh(db_leak)
+
+    # Try to update matching drop
     drop = db.query(SneakerDrop).filter(
         SneakerDrop.name.ilike(f"%{leak.shoe_name[:30]}%")
     ).first()
@@ -340,6 +381,7 @@ async def add_leak(leak: LeakIn, db: Session = Depends(get_db)):
         drop.heat_index = heat["heat_index"]
         drop.scarcity_score = heat["scarcity_score"]
         db.commit()
+
     return db_leak
 
 
@@ -349,28 +391,53 @@ async def get_rarity_distribution(db: Session = Depends(get_db)):
     return {tier: count for tier, count in drops}
 
 
+# --- RAFFLES ---
 @app.get("/api/raffles")
 async def get_raffles():
     raffles = await scrape_raffles()
     return raffles
 
 
+# --- COP TOOLS ---
 @app.post("/api/cop/bookmarklet")
-async def generate_bookmarklet(name: str = "", email: str = "", phone: str = "", size: str = "", zip_code: str = ""):
-    script = f"javascript:void(function(){{var n='{name}';var e='{email}';var p='{phone}';var s='{size}';var z='{zip_code}';document.querySelectorAll('input').forEach(function(i){{var nm=(i.name||'').toLowerCase();var ph=(i.placeholder||'').toLowerCase();var t=nm+' '+ph;if(/name|full.?name|first.?name/.test(t))i.value=n;if(/email|e-mail/.test(t))i.value=e;if(/phone|tel|mobile/.test(t))i.value=p;if(/size|shoe.?size/.test(t))i.value=s;if(/zip|postal|postcode/.test(t))i.value=z;i.dispatchEvent(new Event('input',{{bubbles:true}}));i.dispatchEvent(new Event('change',{{bubbles:true}}))}});alert('SoleOracle Autofill Complete!')}})())"
+async def generate_bookmarklet(
+    name: str = "",
+    email: str = "",
+    phone: str = "",
+    size: str = "",
+    zip_code: str = "",
+):
+    """Generate a JS bookmarklet for autofilling raffle forms."""
+    script = f"""javascript:void(function(){{
+  var n='{name}';var e='{email}';var p='{phone}';var s='{size}';var z='{zip_code}';
+  document.querySelectorAll('input').forEach(function(i){{
+    var nm=(i.name||'').toLowerCase();var ph=(i.placeholder||'').toLowerCase();
+    var t=nm+' '+ph;
+    if(/name|full.?name|first.?name/.test(t))i.value=n;
+    if(/email|e-mail/.test(t))i.value=e;
+    if(/phone|tel|mobile/.test(t))i.value=p;
+    if(/size|shoe.?size/.test(t))i.value=s;
+    if(/zip|postal|postcode/.test(t))i.value=z;
+    i.dispatchEvent(new Event('input',{{bubbles:true}}));
+    i.dispatchEvent(new Event('change',{{bubbles:true}}));
+  }});
+  alert('SoleOracle Autofill Complete!');
+}}())"""
     return {"bookmarklet": script}
 
 
 @app.get("/api/cop/raffle-templates")
 async def get_raffle_templates(name: str = "Sneakerhead", size: str = "10"):
     return {
-        "discord": f"Hey! I'd love to enter the raffle! Name: {name} Size: US {size}",
-        "instagram": f"Entering for my size {size}! @SoleOracle keeping me informed on every drop.",
+        "discord": f"Hey! I'd love to enter the raffle \ud83d\ude4f\nName: {name}\nSize: US {size}\nI'm a daily member and love this community. Good luck everyone! \ud83d\udd25",
+        "instagram": f"\ud83c\udfc0 Entering for my size {size}! @SoleOracle keeping me informed on every drop. Tag a sneakerhead who needs this pair! \ud83d\udc5f",
     }
 
 
+# --- SCRAPER CONTROLS ---
 @app.post("/api/scrapers/run")
 async def trigger_scrapers(target: str = "all"):
+    """Manually trigger scrapers (for testing / on-demand refresh)."""
     if target in ("all", "drops"):
         asyncio.ensure_future(run_drop_scrapers())
     if target in ("all", "production"):
@@ -383,9 +450,11 @@ async def trigger_scrapers(target: str = "all"):
 @app.get("/api/scrapers/logs")
 async def get_scraper_logs(limit: int = 20, db: Session = Depends(get_db)):
     logs = db.query(ScraperLog).order_by(desc(ScraperLog.run_at)).limit(limit).all()
-    return [{"id": l.id, "scraper": l.scraper_name, "status": l.status,
-             "message": l.message, "items_found": l.items_found,
-             "run_at": l.run_at.isoformat() if l.run_at else None} for l in logs]
+    return [{
+        "id": l.id, "scraper": l.scraper_name, "status": l.status,
+        "message": l.message, "items_found": l.items_found,
+        "run_at": l.run_at.isoformat() if l.run_at else None,
+    } for l in logs]
 
 
 @app.get("/api/scheduler/status")
@@ -393,45 +462,200 @@ async def scheduler_status():
     jobs = scheduler.get_jobs()
     return {
         "running": scheduler.running,
-        "jobs": [{"id": j.id, "name": j.name,
-                  "next_run": j.next_run_time.isoformat() if j.next_run_time else None,
-                  "trigger": str(j.trigger)} for j in jobs],
+        "jobs": [{
+            "id": j.id,
+            "name": j.name,
+            "next_run": j.next_run_time.isoformat() if j.next_run_time else None,
+            "trigger": str(j.trigger),
+        } for j in jobs],
     }
 
 
+# --- DIGEST ---
 @app.get("/api/digest")
 async def get_weekly_digest(db: Session = Depends(get_db)):
+    """Generate weekly digest data."""
+    # Top drops by heat
     top_drops = db.query(SneakerDrop).order_by(desc(SneakerDrop.heat_index)).limit(10).all()
+
+    # Portfolio stats
     items = db.query(PortfolioItem).all()
     total_cost = sum(i.purchase_price for i in items) if items else 0
     total_val = sum(i.current_value or i.purchase_price for i in items) if items else 0
+
+    # Rarity distribution
     rarity_dist = db.query(SneakerDrop.rarity_tier, func.count(SneakerDrop.id)).group_by(SneakerDrop.rarity_tier).all()
+
+    # Recent snapshots
     snaps = db.query(PortfolioSnapshot).order_by(desc(PortfolioSnapshot.snapshot_date)).limit(30).all()
+
     return {
         "generated_at": datetime.utcnow().isoformat(),
-        "top_drops": [{"name": d.name, "heat_index": d.heat_index, "rarity_tier": d.rarity_tier,
-                       "retail_price": d.retail_price, "production_number": d.production_number} for d in top_drops],
-        "portfolio": {"total_invested": round(total_cost, 2), "current_value": round(total_val, 2),
-                      "pnl": round(total_val - total_cost, 2), "count": len(items)},
+        "top_drops": [{
+            "name": d.name, "heat_index": d.heat_index, "rarity_tier": d.rarity_tier,
+            "retail_price": d.retail_price, "production_number": d.production_number,
+        } for d in top_drops],
+        "portfolio": {
+            "total_invested": round(total_cost, 2),
+            "current_value": round(total_val, 2),
+            "pnl": round(total_val - total_cost, 2),
+            "count": len(items),
+        },
         "rarity_distribution": {r: c for r, c in rarity_dist},
         "snapshots": [{"date": s.snapshot_date.isoformat(), "value": s.total_value, "cost": s.total_cost} for s in reversed(snaps)],
     }
 
 
+# --- ORACLE ENGINE ---
+
+@app.get("/api/oracle/verdict/{drop_id}")
+async def oracle_verdict_by_id(drop_id: int, db: Session = Depends(get_db)):
+    """Generate Oracle verdict for a specific drop by ID."""
+    drop = db.query(SneakerDrop).get(drop_id)
+    if not drop:
+        raise HTTPException(404, "Drop not found")
+
+    # Auto-fill production estimate if missing
+    if not drop.production_number:
+        est = estimate_production(drop.name, drop.brand, drop.retail_price)
+        drop.production_number = est["production_estimate"]
+        drop.production_confidence = est["confidence"]
+        drop.rarity_tier = _classify_rarity(est["production_estimate"])
+        h = _compute_heat_index(est["production_estimate"], drop.hype_score, drop.resale_multiple, drop.velocity_score)
+        drop.heat_index = h["heat_index"]
+        drop.scarcity_score = h["scarcity_score"]
+        db.commit()
+
+    verdict = generate_verdict_from_drop(drop)
+    verdict["drop_id"] = drop.id
+    verdict["drop_name"] = drop.name
+    return verdict
+
+
+@app.post("/api/oracle/verdict")
+async def oracle_verdict_by_name(
+    name: str = "",
+    brand: str = "",
+    retail_price: Optional[float] = None,
+    db: Session = Depends(get_db),
+):
+    """Generate Oracle verdict by shoe name (search or manual entry)."""
+    if not name:
+        raise HTTPException(400, "Shoe name required")
+
+    # Try to find matching drop in DB
+    drop = db.query(SneakerDrop).filter(
+        SneakerDrop.name.ilike(f"%{name[:40]}%")
+    ).order_by(desc(SneakerDrop.heat_index)).first()
+
+    if drop:
+        if not drop.production_number:
+            est = estimate_production(drop.name, drop.brand, drop.retail_price)
+            drop.production_number = est["production_estimate"]
+            drop.production_confidence = est["confidence"]
+            drop.rarity_tier = _classify_rarity(est["production_estimate"])
+            h = _compute_heat_index(est["production_estimate"], drop.hype_score, drop.resale_multiple, drop.velocity_score)
+            drop.heat_index = h["heat_index"]
+            drop.scarcity_score = h["scarcity_score"]
+            db.commit()
+        verdict = generate_verdict_from_drop(drop)
+        verdict["drop_id"] = drop.id
+        verdict["drop_name"] = drop.name
+        verdict["matched"] = True
+    else:
+        # No match — generate verdict from just the name
+        if not brand:
+            nl = name.lower()
+            if "jordan" in nl:
+                brand = "Jordan"
+            elif "adidas" in nl or "yeezy" in nl:
+                brand = "adidas"
+            elif "new balance" in nl:
+                brand = "New Balance"
+            elif "asics" in nl:
+                brand = "ASICS"
+            else:
+                brand = "Nike"
+        verdict = generate_verdict(
+            name=name, brand=brand, retail_price=retail_price,
+            release_date=None, production_number=None,
+        )
+        verdict["drop_id"] = None
+        verdict["drop_name"] = name
+        verdict["matched"] = False
+
+    return verdict
+
+
+@app.get("/api/oracle/batch")
+async def oracle_batch(limit: int = 20, db: Session = Depends(get_db)):
+    """Generate verdicts for all top drops — used by the Oracle tab."""
+    drops = db.query(SneakerDrop).order_by(desc(SneakerDrop.heat_index)).limit(limit).all()
+    verdicts = []
+    for drop in drops:
+        if not drop.production_number:
+            est = estimate_production(drop.name, drop.brand, drop.retail_price)
+            drop.production_number = est["production_estimate"]
+            drop.production_confidence = est["confidence"]
+            drop.rarity_tier = _classify_rarity(est["production_estimate"])
+            h = _compute_heat_index(est["production_estimate"], drop.hype_score, drop.resale_multiple, drop.velocity_score)
+            drop.heat_index = h["heat_index"]
+            drop.scarcity_score = h["scarcity_score"]
+
+        v = generate_verdict_from_drop(drop)
+        v["drop_id"] = drop.id
+        v["drop_name"] = drop.name
+        v["brand"] = drop.brand
+        v["retail_price"] = drop.retail_price
+        v["release_date"] = drop.release_date.isoformat() if drop.release_date else None
+        v["image_url"] = drop.image_url
+        v["rarity_tier"] = drop.rarity_tier
+        verdicts.append(v)
+
+    db.commit()  # Save any production estimates we filled in
+    return verdicts
+
+
+@app.post("/api/oracle/estimate-production")
+async def oracle_estimate_production(name: str = "", brand: str = "", retail_price: Optional[float] = None):
+    """Estimate production number for any shoe."""
+    if not name:
+        raise HTTPException(400, "Shoe name required")
+    if not brand:
+        nl = name.lower()
+        if "jordan" in nl:
+            brand = "Jordan"
+        elif "adidas" in nl or "yeezy" in nl:
+            brand = "adidas"
+        elif "new balance" in nl:
+            brand = "New Balance"
+        else:
+            brand = "Nike"
+    return estimate_production(name, brand, retail_price)
+
+
+# --- EXPORT / IMPORT ---
 @app.get("/api/export")
 async def export_data(db: Session = Depends(get_db)):
     drops = db.query(SneakerDrop).all()
     items = db.query(PortfolioItem).all()
     leaks = db.query(ProductionLeak).all()
+
     return {
         "exported_at": datetime.utcnow().isoformat(),
-        "drops": [{"name": d.name, "brand": d.brand, "colorway": d.colorway,
-                   "style_code": d.style_code, "retail_price": d.retail_price,
-                   "release_date": d.release_date.isoformat() if d.release_date else None,
-                   "production_number": d.production_number, "heat_index": d.heat_index,
-                   "rarity_tier": d.rarity_tier} for d in drops],
-        "portfolio": [{"name": i.name, "size": i.size, "purchase_price": i.purchase_price,
-                       "current_value": i.current_value, "condition": i.condition} for i in items],
-        "leaks": [{"shoe_name": l.shoe_name, "production_number": l.production_number,
-                   "confidence": l.confidence, "source_url": l.source_url} for l in leaks],
+        "drops": [{
+            "name": d.name, "brand": d.brand, "colorway": d.colorway,
+            "style_code": d.style_code, "retail_price": d.retail_price,
+            "release_date": d.release_date.isoformat() if d.release_date else None,
+            "production_number": d.production_number, "heat_index": d.heat_index,
+            "rarity_tier": d.rarity_tier,
+        } for d in drops],
+        "portfolio": [{
+            "name": i.name, "size": i.size, "purchase_price": i.purchase_price,
+            "current_value": i.current_value, "condition": i.condition,
+        } for i in items],
+        "leaks": [{
+            "shoe_name": l.shoe_name, "production_number": l.production_number,
+            "confidence": l.confidence, "source_url": l.source_url,
+        } for l in leaks],
     }
