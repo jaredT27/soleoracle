@@ -6,6 +6,7 @@ from xml.etree import ElementTree as ET
 import httpx
 from bs4 import BeautifulSoup
 from models import SessionLocal, SneakerDrop, ProductionLeak, ScraperLog, PortfolioItem, PortfolioSnapshot
+from oracle import estimate_production
 
 logger = logging.getLogger("soleoracle.scrapers")
 logging.basicConfig(level=logging.INFO)
@@ -19,7 +20,7 @@ HEADERS = {
 def _parse_price(text: str) -> Optional[float]:
     if not text:
         return None
-    m = re.search(r"\$\s?([\d,]+(?:\.\d{2})?)", text.replace(",", ""))
+    m = re.search(r"\$\s?[\d,]+(?:\.\d{2})?", text.replace(",", ""))
     return float(m.group(1)) if m else None
 
 def _parse_date(text: str) -> Optional[datetime]:
@@ -107,9 +108,9 @@ def _is_sneaker(name: str) -> bool:
     return any(kw in nl for kw in sneaker_keywords)
 
 
-# ═══════════════════════════════════════════════
+# ===============================================
 # RSS Scraper 1: Kicks On Fire (richest, 100 items)
-# ═══════════════════════════════════════════════
+# ===============================================
 async def scrape_kicksonfire_rss() -> list[dict]:
     """Kicks On Fire RSS feed — large catalog with images and dates."""
     drops = []
@@ -187,9 +188,9 @@ async def scrape_kicksonfire_rss() -> list[dict]:
     return drops
 
 
-# ═══════════════════════════════════════════════
+# ===============================================
 # RSS Scraper 2: Sneaker News (quality data with prices)
-# ═══════════════════════════════════════════════
+# ===============================================
 async def scrape_sneakernews_rss() -> list[dict]:
     """Sneaker News RSS feed — smaller but high quality with prices + images."""
     drops = []
@@ -258,9 +259,9 @@ async def scrape_sneakernews_rss() -> list[dict]:
     return drops
 
 
-# ═══════════════════════════════════════════════
+# ===============================================
 # RSS Scraper 3: Nice Kicks
-# ═══════════════════════════════════════════════
+# ===============================================
 async def scrape_nicekicks_rss() -> list[dict]:
     """Nice Kicks RSS feed."""
     drops = []
@@ -320,9 +321,9 @@ async def scrape_nicekicks_rss() -> list[dict]:
     return drops
 
 
-# ═══════════════════════════════════════════════
+# ===============================================
 # Curated seed data — real upcoming releases
-# ═══════════════════════════════════════════════
+# ===============================================
 def get_seed_drops() -> list[dict]:
     """Curated list of confirmed upcoming sneaker releases to ensure the app always has data."""
     seed = [
@@ -405,9 +406,9 @@ def get_seed_drops() -> list[dict]:
     return seed
 
 
-# ═══════════════════════════════════════════════
+# ===============================================
 # Scraper: Production intel from Hypebeast RSS
-# ═══════════════════════════════════════════════
+# ===============================================
 async def scrape_production_intel() -> list[dict]:
     leaks = []
     production_patterns = [
@@ -463,9 +464,9 @@ async def scrape_production_intel() -> list[dict]:
     return leaks
 
 
-# ═══════════════════════════════════════════════
+# ===============================================
 # Scraper: Resale prices (best effort)
-# ═══════════════════════════════════════════════
+# ===============================================
 async def scrape_resale_price(style_code: str, name: str) -> dict:
     result = {"stockx_price": None, "goat_price": None, "stockx_url": "", "goat_url": ""}
     if not style_code and not name:
@@ -511,9 +512,9 @@ async def scrape_resale_price(style_code: str, name: str) -> dict:
     return result
 
 
-# ═══════════════════════════════════════════════
+# ===============================================
 # Scraper: Sole Retriever raffles
-# ═══════════════════════════════════════════════
+# ===============================================
 async def scrape_raffles() -> list[dict]:
     raffles = []
     try:
@@ -567,9 +568,9 @@ async def scrape_raffles() -> list[dict]:
     return raffles
 
 
-# ═══════════════════════════════════════════════
+# ===============================================
 # Orchestrator — run all and save to DB
-# ═══════════════════════════════════════════════
+# ===============================================
 async def run_drop_scrapers():
     logger.info("=== Starting drop scraper run ===")
     db = SessionLocal()
@@ -628,8 +629,26 @@ async def run_drop_scrapers():
                     existing.production_number = d["production_number"]
                     existing.production_confidence = d.get("production_confidence", "Estimated")
                     existing.rarity_tier = _classify_rarity(d["production_number"])
+                # Auto-estimate production if still missing
+                if not existing.production_number:
+                    est = estimate_production(existing.name, existing.brand, existing.retail_price)
+                    existing.production_number = est["production_estimate"]
+                    existing.production_confidence = est["confidence"]
+                    existing.rarity_tier = _classify_rarity(est["production_estimate"])
+                    h = _compute_heat_index(est["production_estimate"], existing.hype_score or 5.0, existing.resale_multiple or 1.0, existing.velocity_score or 5.0)
+                    existing.heat_index = h["heat_index"]
+                    existing.scarcity_score = h["scarcity_score"]
                 existing.updated_at = datetime.utcnow()
             else:
+                # Auto-estimate production for new drops if not provided
+                if not prod:
+                    est = estimate_production(d["name"], d.get("brand", "Nike"), d.get("retail_price"))
+                    prod = est["production_estimate"]
+                    d["production_confidence"] = est["confidence"]
+                    d["rarity_tier"] = _classify_rarity(prod)
+                    hype = 5.0 + (2.0 if d.get("brand") in ("Jordan", "Nike") else 0)
+                    heat = _compute_heat_index(prod, hype, 1.2, 5.0)
+
                 drop = SneakerDrop(
                     name=d["name"], brand=d.get("brand", "Nike"),
                     colorway=d.get("colorway", ""), style_code=d.get("style_code", ""),
